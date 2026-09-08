@@ -1,0 +1,18 @@
+{
+  "version": "2.0",
+  "routeKey": "POST /v1/briefs",
+  "rawPath": "/v1/briefs",
+  "headers": {
+    "origin": "https://swirawan.github.io",
+    "content-type": "application/json"
+  },
+  "requestContext": {
+    "http": {
+      "method": "POST",
+      "path": "/v1/briefs",
+      "sourceIp": "203.0.113.4"
+    }
+  },
+  "body": "{\"version\":\"phase5.1\",\"language\":\"en\",\"name\":\"Alya Prasetyo\",\"phone\":\"+62 812 0000 0000\",\"email\":\"alya@example.com\",\"preferredContact\":\"WhatsApp\",\"eventType\":\"Wedding\",\"product\":\"\",\"package\":\"Full KASANE\",\"direction\":\"Quiet Luxury\",\"city\":\"Surabaya\",\"date\":\"2027-06-12\",\"guests\":\"300\",\"message\":\"We want a calm evening wedding with full planning support.\",\"page\":\"https://swirawan.github.io/kasane-collective/\",\"captchaToken\":\"\",\"website\":\"\"}",
+  "isBase64Encoded": false
+}

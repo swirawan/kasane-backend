@@ -1,0 +1,158 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: KASANE COLLECTIVE event brief API
+
+Parameters:
+  StageName:
+    Type: String
+    Default: dev
+    AllowedPattern: '^[a-z0-9-]+$'
+  AllowedOrigins:
+    Type: CommaDelimitedList
+    Default: https://swirawan.github.io
+  AllowedOriginsEnv:
+    Type: String
+    Default: https://swirawan.github.io
+    Description: Same origins as AllowedOrigins, comma-separated, used by Lambda validation.
+  CaptchaRequired:
+    Type: String
+    Default: 'false'
+    AllowedValues: ['true', 'false']
+  TurnstileExpectedHostnames:
+    Type: String
+    Default: swirawan.github.io,kasanecollective.com,www.kasanecollective.com
+  TurnstileExpectedAction:
+    Type: String
+    Default: kasane_brief
+  EmailEnabled:
+    Type: String
+    Default: 'false'
+    AllowedValues: ['true', 'false']
+  FromEmail:
+    Type: String
+    Default: hello@example.com
+  NotificationEmails:
+    Type: String
+    Default: ''
+    Description: Comma-separated recipient addresses for KASANE lead notifications.
+  LeadRetentionDays:
+    Type: Number
+    Default: 730
+    MinValue: 30
+    MaxValue: 3650
+
+Globals:
+  Function:
+    Runtime: python3.13
+    Architectures: [arm64]
+    MemorySize: 256
+    Timeout: 10
+    Tracing: Active
+    Environment:
+      Variables:
+        STAGE: !Ref StageName
+        LOG_LEVEL: INFO
+
+Resources:
+  BriefApi:
+    Type: AWS::Serverless::HttpApi
+    Properties:
+      StageName: !Ref StageName
+      CorsConfiguration:
+        AllowOrigins: !Ref AllowedOrigins
+        AllowMethods: [GET, POST, OPTIONS]
+        AllowHeaders: [content-type]
+        MaxAge: 600
+      DefaultRouteSettings:
+        ThrottlingRateLimit: 5
+        ThrottlingBurstLimit: 10
+      AccessLogSettings:
+        DestinationArn: !GetAtt ApiAccessLogs.Arn
+        Format: '{"requestId":"$context.requestId","routeKey":"$context.routeKey","status":"$context.status","responseLength":"$context.responseLength","ip":"$context.identity.sourceIp"}'
+
+  ApiAccessLogs:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      RetentionInDays: 30
+
+  BriefFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: src/
+      Handler: app.handler
+      Description: Validates CAPTCHA, stores KASANE event briefs, and sends SES notifications.
+      Environment:
+        Variables:
+          TABLE_NAME: !Ref LeadsTable
+          ALLOWED_ORIGINS: !Ref AllowedOriginsEnv
+          CAPTCHA_REQUIRED: !Ref CaptchaRequired
+          TURNSTILE_SECRET_ARN: !Ref TurnstileSecret
+          TURNSTILE_EXPECTED_HOSTNAMES: !Ref TurnstileExpectedHostnames
+          TURNSTILE_EXPECTED_ACTION: !Ref TurnstileExpectedAction
+          EMAIL_ENABLED: !Ref EmailEnabled
+          FROM_EMAIL: !Ref FromEmail
+          NOTIFICATION_EMAILS: !Ref NotificationEmails
+          LEAD_RETENTION_DAYS: !Ref LeadRetentionDays
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref LeadsTable
+        - Statement:
+            - Effect: Allow
+              Action: secretsmanager:GetSecretValue
+              Resource: !Ref TurnstileSecret
+            - Effect: Allow
+              Action: ses:SendEmail
+              Resource: !Sub arn:${AWS::Partition}:ses:${AWS::Region}:${AWS::AccountId}:identity/${FromEmail}
+      Events:
+        SubmitBrief:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref BriefApi
+            Path: /v1/briefs
+            Method: POST
+        Health:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref BriefApi
+            Path: /health
+            Method: GET
+
+  LeadsTable:
+    Type: AWS::DynamoDB::Table
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: reference
+          AttributeType: S
+      KeySchema:
+        - AttributeName: reference
+          KeyType: HASH
+      SSESpecification:
+        SSEEnabled: true
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+      TimeToLiveSpecification:
+        AttributeName: expiresAt
+        Enabled: true
+
+  TurnstileSecret:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Description: Cloudflare Turnstile secret for the KASANE public event brief form.
+      SecretString: '{"secret":"REPLACE_ME"}'
+
+Outputs:
+  ApiBaseUrl:
+    Description: HTTP API base URL
+    Value: !Sub https://${BriefApi}.execute-api.${AWS::Region}.${AWS::URLSuffix}/${StageName}
+  BriefEndpoint:
+    Description: Put this value into frontend config.js as briefEndpoint
+    Value: !Sub https://${BriefApi}.execute-api.${AWS::Region}.${AWS::URLSuffix}/${StageName}/v1/briefs
+  HealthEndpoint:
+    Value: !Sub https://${BriefApi}.execute-api.${AWS::Region}.${AWS::URLSuffix}/${StageName}/health
+  LeadsTableName:
+    Value: !Ref LeadsTable
+  TurnstileSecretArn:
+    Value: !Ref TurnstileSecret

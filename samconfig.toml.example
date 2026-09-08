@@ -1,0 +1,10 @@
+version = 0.1
+
+[dev.deploy.parameters]
+stack_name = "kasane-backend-dev"
+resolve_s3 = true
+s3_prefix = "kasane-backend-dev"
+region = "us-east-1"
+confirm_changeset = true
+capabilities = "CAPABILITY_IAM"
+parameter_overrides = "StageName=dev CaptchaRequired=false EmailEnabled=false AllowedOrigins=\"https://swirawan.github.io\" AllowedOriginsEnv=\"https://swirawan.github.io\" TurnstileExpectedHostnames=\"swirawan.github.io\""
