@@ -446,6 +446,34 @@ Resources:
             Path: /v1/admin/leads/{reference}
             Method: GET
 
+        ChangeLeadStatus:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref AdminApi
+            Path: /v1/admin/leads/{reference}/status
+            Method: PATCH
+
+        ConvertLead:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref AdminApi
+            Path: /v1/admin/leads/{reference}/convert
+            Method: POST
+
+        ListProjects:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref AdminApi
+            Path: /v1/admin/projects
+            Method: GET
+
+        GetProject:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref AdminApi
+            Path: /v1/admin/projects/{projectId}
+            Method: GET
+
         ListStaff:
           Type: HttpApi
           Properties:

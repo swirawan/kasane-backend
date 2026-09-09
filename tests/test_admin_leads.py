@@ -97,6 +97,10 @@ def test_owner_can_list_leads():
         admin_app,
         "_list_leads",
         return_value=[lead()],
+    ), patch.object(
+        admin_app,
+        "_lead_states",
+        return_value={},
     ):
         response = admin_app.handler(
             event("/v1/admin/leads"),
@@ -119,6 +123,10 @@ def test_manager_can_list_leads():
         admin_app,
         "_list_leads",
         return_value=[lead()],
+    ), patch.object(
+        admin_app,
+        "_lead_states",
+        return_value={},
     ):
         response = admin_app.handler(
             event("/v1/admin/leads"),
@@ -163,6 +171,10 @@ def test_owner_can_get_lead_detail():
         admin_app,
         "_lead_record",
         return_value=item,
+    ), patch.object(
+        admin_app,
+        "_lead_state",
+        return_value=None,
     ):
         response = admin_app.handler(
             event(

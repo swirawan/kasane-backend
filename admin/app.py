@@ -8,6 +8,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 import boto3
+from boto3.dynamodb.types import TypeSerializer
 from botocore.exceptions import BotoCoreError, ClientError
 
 
@@ -34,6 +35,24 @@ STAFF_STATUSES = (
     "ACTIVE",
     "DISABLED",
 )
+
+LEAD_STATUSES = (
+    "NEW",
+    "CONTACTED",
+    "QUALIFIED",
+    "PROPOSAL",
+    "NEGOTIATION",
+    "WON",
+    "LOST",
+    "ON_HOLD",
+)
+
+
+class LeadConversionConflict(RuntimeError):
+    pass
+
+
+_serializer = TypeSerializer()
 
 _ops_table_instance = None
 _leads_table_instance = None
@@ -104,6 +123,7 @@ def _public_lead(
     item: dict[str, Any],
     *,
     detail: bool = False,
+    state: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     lead = {
         "reference": str(
@@ -163,6 +183,23 @@ def _public_lead(
             or ""
         ),
     }
+
+    state = state or {}
+
+    lead["pipelineStatus"] = str(
+        state.get("status")
+        or "NEW"
+    )
+
+    lead["convertedProjectId"] = str(
+        state.get("convertedProjectId")
+        or ""
+    )
+
+    lead["pipelineUpdatedAt"] = str(
+        state.get("updatedAt")
+        or ""
+    )
 
     if detail:
         lead["message"] = str(
@@ -233,6 +270,586 @@ def _lead_record(
         return None
 
     return item
+
+
+def _serialize_map(
+    value: dict[str, Any],
+) -> dict[str, Any]:
+    return {
+        key: _serializer.serialize(item)
+        for key, item in value.items()
+    }
+
+
+def _lead_state(
+    reference: str,
+) -> dict[str, Any] | None:
+    response = _ops_table().get_item(
+        Key={
+            "PK": f"LEAD#{reference}",
+            "SK": "STATE",
+        },
+        ConsistentRead=True,
+    )
+
+    item = response.get("Item")
+
+    if not isinstance(item, dict):
+        return None
+
+    return item
+
+
+def _lead_states(
+    references: list[str],
+) -> dict[str, dict[str, Any]]:
+    unique = list(dict.fromkeys(
+        reference
+        for reference in references
+        if reference
+    ))
+
+    if not unique:
+        return {}
+
+    request = {
+        OPS_TABLE_NAME: {
+            "Keys": [
+                {
+                    "PK": f"LEAD#{reference}",
+                    "SK": "STATE",
+                }
+                for reference in unique
+            ],
+            "ConsistentRead": True,
+        }
+    }
+
+    items: list[dict[str, Any]] = []
+    dynamodb = boto3.resource("dynamodb")
+
+    for _ in range(4):
+        response = dynamodb.batch_get_item(
+            RequestItems=request
+        )
+
+        items.extend(
+            response
+            .get("Responses", {})
+            .get(OPS_TABLE_NAME, [])
+        )
+
+        unprocessed = (
+            response.get("UnprocessedKeys")
+            or {}
+        )
+
+        if not unprocessed:
+            break
+
+        request = unprocessed
+    else:
+        raise RuntimeError(
+            "lead_state_batch_incomplete"
+        )
+
+    result: dict[str, dict[str, Any]] = {}
+
+    for item in items:
+        reference = str(
+            item.get("leadReference")
+            or ""
+        )
+
+        if not reference:
+            pk = str(item.get("PK") or "")
+
+            if pk.startswith("LEAD#"):
+                reference = pk[5:]
+
+        if reference:
+            result[reference] = item
+
+    return result
+
+
+def _set_lead_status(
+    reference: str,
+    status: str,
+    actor_subject: str,
+) -> dict[str, Any]:
+    now = _utcnow()
+
+    kwargs: dict[str, Any] = {
+        "Key": {
+            "PK": f"LEAD#{reference}",
+            "SK": "STATE",
+        },
+        "UpdateExpression": (
+            "SET "
+            "recordType = if_not_exists("
+            "recordType, :record_type), "
+            "leadReference = if_not_exists("
+            "leadReference, :reference), "
+            "#status = :status, "
+            "createdAt = if_not_exists("
+            "createdAt, :now), "
+            "createdBy = if_not_exists("
+            "createdBy, :actor), "
+            "updatedAt = :now, "
+            "updatedBy = :actor, "
+            "GSI3PK = :gsi_pk, "
+            "GSI3SK = :gsi_sk"
+        ),
+        "ExpressionAttributeNames": {
+            "#status": "status",
+        },
+        "ExpressionAttributeValues": {
+            ":record_type": "LEAD_STATE",
+            ":reference": reference,
+            ":status": status,
+            ":now": now,
+            ":actor": actor_subject,
+            ":gsi_pk":
+                f"LEADS#STATUS#{status}",
+            ":gsi_sk":
+                f"UPDATED#{now}#LEAD#{reference}",
+        },
+        "ReturnValues": "ALL_NEW",
+    }
+
+    if status != "WON":
+        kwargs["ConditionExpression"] = (
+            "attribute_not_exists("
+            "convertedProjectId)"
+        )
+
+    response = _ops_table().update_item(
+        **kwargs
+    )
+
+    return response["Attributes"]
+
+
+def _next_project_id() -> str:
+    response = _ops_table().update_item(
+        Key={
+            "PK": "SYSTEM#COUNTERS",
+            "SK": "PROJECT",
+        },
+        UpdateExpression=(
+            "SET "
+            "recordType = if_not_exists("
+            "recordType, :record_type), "
+            "updatedAt = :updated "
+            "ADD nextValue :one"
+        ),
+        ExpressionAttributeValues={
+            ":record_type": "COUNTER",
+            ":updated": _utcnow(),
+            ":one": 1,
+        },
+        ReturnValues="ALL_NEW",
+    )
+
+    number = int(
+        response["Attributes"]["nextValue"]
+    )
+
+    return f"KAS-{number:03d}"
+
+
+def _public_project(
+    item: dict[str, Any],
+) -> dict[str, Any]:
+    return {
+        "projectId": str(
+            item.get("projectId")
+            or ""
+        ),
+        "name": str(
+            item.get("name")
+            or ""
+        ),
+        "status": str(
+            item.get("status")
+            or ""
+        ),
+        "phase": str(
+            item.get("phase")
+            or ""
+        ),
+        "leadReference": str(
+            item.get("leadReference")
+            or ""
+        ),
+        "clientName": str(
+            item.get("clientName")
+            or ""
+        ),
+        "email": str(
+            item.get("email")
+            or ""
+        ),
+        "phone": str(
+            item.get("phone")
+            or ""
+        ),
+        "preferredContact": str(
+            item.get("preferredContact")
+            or ""
+        ),
+        "eventType": str(
+            item.get("eventType")
+            or ""
+        ),
+        "eventDate": str(
+            item.get("eventDate")
+            or ""
+        ),
+        "city": str(
+            item.get("city")
+            or ""
+        ),
+        "guests": str(
+            item.get("guests")
+            or ""
+        ),
+        "createdAt": str(
+            item.get("createdAt")
+            or ""
+        ),
+        "updatedAt": str(
+            item.get("updatedAt")
+            or ""
+        ),
+    }
+
+
+def _project_record(
+    project_id: str,
+) -> dict[str, Any] | None:
+    if (
+        not project_id
+        or not project_id.startswith("KAS-")
+        or len(project_id) > 40
+    ):
+        return None
+
+    response = _ops_table().get_item(
+        Key={
+            "PK": f"PROJECT#{project_id}",
+            "SK": "META",
+        },
+        ConsistentRead=True,
+    )
+
+    item = response.get("Item")
+
+    if (
+        not isinstance(item, dict)
+        or item.get("recordType")
+            != "PROJECT"
+    ):
+        return None
+
+    return item
+
+
+def _list_projects(
+    limit: int = 100,
+) -> list[dict[str, Any]]:
+    response = _ops_table().query(
+        IndexName="GSI3",
+        KeyConditionExpression=(
+            "GSI3PK = :pk"
+        ),
+        ExpressionAttributeValues={
+            ":pk": "PROJECTS",
+        },
+        ScanIndexForward=True,
+        Limit=limit,
+    )
+
+    return [
+        item
+        for item in (
+            response.get("Items")
+            or []
+        )
+        if (
+            isinstance(item, dict)
+            and item.get("recordType")
+                == "PROJECT"
+        )
+    ]
+
+
+def _convert_lead(
+    lead: dict[str, Any],
+    actor_subject: str,
+) -> tuple[dict[str, Any], bool]:
+    reference = str(
+        lead.get("reference")
+        or ""
+    )
+
+    existing_state = _lead_state(
+        reference
+    )
+
+    if existing_state:
+        existing_project_id = str(
+            existing_state.get(
+                "convertedProjectId"
+            )
+            or ""
+        )
+
+        if existing_project_id:
+            existing_project = (
+                _project_record(
+                    existing_project_id
+                )
+            )
+
+            if not existing_project:
+                raise RuntimeError(
+                    "converted_project_missing"
+                )
+
+            return existing_project, False
+
+        if (
+            str(
+                existing_state.get("status")
+                or ""
+            ).upper()
+            == "LOST"
+        ):
+            raise LeadConversionConflict(
+                "lead_marked_lost"
+            )
+
+    client_name = str(
+        lead.get("name")
+        or "Untitled client"
+    ).strip()
+
+    event_type = str(
+        lead.get("eventType")
+        or ""
+    ).strip()
+
+    project_name = (
+        f"{client_name} · {event_type}"
+        if event_type
+        else client_name
+    )
+
+    for _ in range(4):
+        project_id = _next_project_id()
+        now = _utcnow()
+
+        event_date = str(
+            lead.get("date")
+            or ""
+        ).strip()
+
+        project = {
+            "PK":
+                f"PROJECT#{project_id}",
+            "SK": "META",
+            "recordType": "PROJECT",
+            "projectId": project_id,
+            "name": project_name,
+            "status": "ACTIVE",
+            "phase": "PLANNING",
+            "leadReference": reference,
+            "clientName": client_name,
+            "email": str(
+                lead.get("email")
+                or ""
+            ),
+            "phone": str(
+                lead.get("phone")
+                or ""
+            ),
+            "preferredContact": str(
+                lead.get("preferredContact")
+                or ""
+            ),
+            "eventType": event_type,
+            "eventDate": event_date,
+            "city": str(
+                lead.get("city")
+                or ""
+            ),
+            "guests": str(
+                lead.get("guests")
+                or ""
+            ),
+            "createdAt": now,
+            "createdBy": actor_subject,
+            "updatedAt": now,
+            "updatedBy": actor_subject,
+            "GSI3PK": "PROJECTS",
+            "GSI3SK": (
+                "STATUS#ACTIVE"
+                f"#DATE#{event_date or '9999-12-31'}"
+                f"#PROJECT#{project_id}"
+            ),
+        }
+
+        try:
+            boto3.client(
+                "dynamodb"
+            ).transact_write_items(
+                TransactItems=[
+                    {
+                        "Put": {
+                            "TableName":
+                                OPS_TABLE_NAME,
+                            "Item":
+                                _serialize_map(
+                                    project
+                                ),
+                            "ConditionExpression": (
+                                "attribute_not_exists("
+                                "PK)"
+                            ),
+                        }
+                    },
+                    {
+                        "Update": {
+                            "TableName":
+                                OPS_TABLE_NAME,
+                            "Key":
+                                _serialize_map({
+                                    "PK":
+                                        f"LEAD#{reference}",
+                                    "SK":
+                                        "STATE",
+                                }),
+                            "UpdateExpression": (
+                                "SET "
+                                "recordType = "
+                                "if_not_exists("
+                                "recordType, "
+                                ":record_type), "
+                                "leadReference = "
+                                "if_not_exists("
+                                "leadReference, "
+                                ":reference), "
+                                "#status = :won, "
+                                "convertedProjectId = "
+                                ":project_id, "
+                                "createdAt = "
+                                "if_not_exists("
+                                "createdAt, :now), "
+                                "createdBy = "
+                                "if_not_exists("
+                                "createdBy, :actor), "
+                                "updatedAt = :now, "
+                                "updatedBy = :actor, "
+                                "GSI3PK = :gsi_pk, "
+                                "GSI3SK = :gsi_sk"
+                            ),
+                            "ConditionExpression": (
+                                "attribute_not_exists("
+                                "convertedProjectId) "
+                                "AND ("
+                                "attribute_not_exists("
+                                "#status) "
+                                "OR #status <> :lost)"
+                            ),
+                            "ExpressionAttributeNames": {
+                                "#status": "status",
+                            },
+                            "ExpressionAttributeValues":
+                                _serialize_map({
+                                    ":record_type":
+                                        "LEAD_STATE",
+                                    ":reference":
+                                        reference,
+                                    ":won":
+                                        "WON",
+                                    ":lost":
+                                        "LOST",
+                                    ":project_id":
+                                        project_id,
+                                    ":now":
+                                        now,
+                                    ":actor":
+                                        actor_subject,
+                                    ":gsi_pk":
+                                        "LEADS#STATUS#WON",
+                                    ":gsi_sk":
+                                        (
+                                            f"UPDATED#{now}"
+                                            f"#LEAD#{reference}"
+                                        ),
+                                }),
+                        }
+                    },
+                ]
+            )
+
+            return project, True
+
+        except ClientError as exc:
+            if (
+                _aws_error_code(exc)
+                !=
+                "TransactionCanceledException"
+            ):
+                raise
+
+            current_state = _lead_state(
+                reference
+            )
+
+            if current_state:
+                existing_project_id = str(
+                    current_state.get(
+                        "convertedProjectId"
+                    )
+                    or ""
+                )
+
+                if existing_project_id:
+                    existing_project = (
+                        _project_record(
+                            existing_project_id
+                        )
+                    )
+
+                    if not existing_project:
+                        raise RuntimeError(
+                            "converted_project_missing"
+                        )
+
+                    return (
+                        existing_project,
+                        False,
+                    )
+
+                if (
+                    str(
+                        current_state.get(
+                            "status"
+                        )
+                        or ""
+                    ).upper()
+                    == "LOST"
+                ):
+                    raise LeadConversionConflict(
+                        "lead_marked_lost"
+                    )
+
+    raise RuntimeError(
+        "project_conversion_failed"
+    )
 
 
 def _cognito():
@@ -1159,6 +1776,18 @@ def _handle_list_leads():
     try:
         items = _list_leads()
 
+        references = [
+            str(
+                item.get("reference")
+                or ""
+            )
+            for item in items
+        ]
+
+        states = _lead_states(
+            references
+        )
+
     except (
         BotoCoreError,
         ClientError,
@@ -1180,7 +1809,17 @@ def _handle_list_leads():
         200,
         {
             "items": [
-                _public_lead(item)
+                _public_lead(
+                    item,
+                    state=states.get(
+                        str(
+                            item.get(
+                                "reference"
+                            )
+                            or ""
+                        )
+                    ),
+                )
                 for item in items
             ],
             "count": len(items),
@@ -1215,6 +1854,19 @@ def _handle_get_lead(
             reference
         )
 
+        if not item:
+            return _response(
+                404,
+                {
+                    "error":
+                        "lead_not_found"
+                },
+            )
+
+        state = _lead_state(
+            reference
+        )
+
     except (
         BotoCoreError,
         ClientError,
@@ -1232,22 +1884,328 @@ def _handle_get_lead(
             },
         )
 
-    if not item:
-        return _response(
-            404,
-            {"error": "lead_not_found"},
-        )
-
     return _response(
         200,
         {
             "lead": _public_lead(
                 item,
                 detail=True,
+                state=state,
             ),
         },
     )
 
+
+def _handle_lead_status_change(
+    event: dict[str, Any],
+    actor_subject: str,
+):
+    parameters = (
+        event.get("pathParameters")
+        or {}
+    )
+
+    reference = str(
+        parameters.get("reference")
+        or ""
+    ).strip()
+
+    if not reference:
+        return _response(
+            400,
+            {
+                "error":
+                    "reference_required"
+            },
+        )
+
+    body = _request_body(event)
+
+    if body is None:
+        return _response(
+            400,
+            {"error": "invalid_json"},
+        )
+
+    status = str(
+        body.get("status")
+        or ""
+    ).strip().upper()
+
+    if status not in LEAD_STATUSES:
+        return _response(
+            400,
+            {
+                "error":
+                    "invalid_lead_status"
+            },
+        )
+
+    try:
+        lead = _lead_record(
+            reference
+        )
+
+        if not lead:
+            return _response(
+                404,
+                {
+                    "error":
+                        "lead_not_found"
+                },
+            )
+
+        state = _set_lead_status(
+            reference,
+            status,
+            actor_subject,
+        )
+
+    except ClientError as exc:
+        if (
+            _aws_error_code(exc)
+            ==
+            "ConditionalCheckFailedException"
+        ):
+            return _response(
+                409,
+                {
+                    "error":
+                        "converted_lead_locked"
+                },
+            )
+
+        LOGGER.exception(
+            "Lead status update failed"
+        )
+
+        return _response(
+            503,
+            {
+                "error":
+                    "temporarily_unavailable"
+            },
+        )
+
+    except (
+        BotoCoreError,
+        RuntimeError,
+    ):
+        LOGGER.exception(
+            "Lead status update failed"
+        )
+
+        return _response(
+            503,
+            {
+                "error":
+                    "temporarily_unavailable"
+            },
+        )
+
+    LOGGER.info(
+        "lead_pipeline action=status_change "
+        "actor=%s lead=%s status=%s",
+        actor_subject,
+        reference,
+        status,
+    )
+
+    return _response(
+        200,
+        {
+            "lead": _public_lead(
+                lead,
+                detail=True,
+                state=state,
+            ),
+        },
+    )
+
+
+def _handle_convert_lead(
+    event: dict[str, Any],
+    actor_subject: str,
+):
+    parameters = (
+        event.get("pathParameters")
+        or {}
+    )
+
+    reference = str(
+        parameters.get("reference")
+        or ""
+    ).strip()
+
+    if not reference:
+        return _response(
+            400,
+            {
+                "error":
+                    "reference_required"
+            },
+        )
+
+    try:
+        lead = _lead_record(
+            reference
+        )
+
+        if not lead:
+            return _response(
+                404,
+                {
+                    "error":
+                        "lead_not_found"
+                },
+            )
+
+        project, created = (
+            _convert_lead(
+                lead,
+                actor_subject,
+            )
+        )
+
+    except LeadConversionConflict as exc:
+        return _response(
+            409,
+            {
+                "error":
+                    str(exc)
+            },
+        )
+
+    except (
+        BotoCoreError,
+        ClientError,
+        RuntimeError,
+    ):
+        LOGGER.exception(
+            "Lead conversion failed"
+        )
+
+        return _response(
+            503,
+            {
+                "error":
+                    "temporarily_unavailable"
+            },
+        )
+
+    LOGGER.info(
+        "lead_pipeline action=convert "
+        "actor=%s lead=%s project=%s "
+        "created=%s",
+        actor_subject,
+        reference,
+        project.get("projectId"),
+        created,
+    )
+
+    return _response(
+        201 if created else 200,
+        {
+            "project":
+                _public_project(project),
+            "created": created,
+        },
+    )
+
+
+def _handle_list_projects():
+    try:
+        projects = _list_projects()
+
+    except (
+        BotoCoreError,
+        ClientError,
+        RuntimeError,
+    ):
+        LOGGER.exception(
+            "Failed to list projects"
+        )
+
+        return _response(
+            503,
+            {
+                "error":
+                    "temporarily_unavailable"
+            },
+        )
+
+    return _response(
+        200,
+        {
+            "items": [
+                _public_project(project)
+                for project in projects
+            ],
+            "count": len(projects),
+        },
+    )
+
+
+def _handle_get_project(
+    event: dict[str, Any],
+):
+    parameters = (
+        event.get("pathParameters")
+        or {}
+    )
+
+    project_id = str(
+        parameters.get("projectId")
+        or ""
+    ).strip()
+
+    if not project_id:
+        return _response(
+            400,
+            {
+                "error":
+                    "project_id_required"
+            },
+        )
+
+    try:
+        project = _project_record(
+            project_id
+        )
+
+    except (
+        BotoCoreError,
+        ClientError,
+        RuntimeError,
+    ):
+        LOGGER.exception(
+            "Failed to read project"
+        )
+
+        return _response(
+            503,
+            {
+                "error":
+                    "temporarily_unavailable"
+            },
+        )
+
+    if not project:
+        return _response(
+            404,
+            {
+                "error":
+                    "project_not_found"
+            },
+        )
+
+    return _response(
+        200,
+        {
+            "project":
+                _public_project(project),
+        },
+    )
 
 def _handle_list_staff():
     try:
@@ -1700,6 +2658,90 @@ def handler(
             )
 
         return _handle_get_lead(
+            event
+        )
+
+    if (
+        method == "PATCH"
+        and "/v1/admin/leads/" in path
+        and path.endswith("/status")
+    ):
+        if identity["role"] not in {
+            "OWNER",
+            "MANAGER",
+        }:
+            return _response(
+                403,
+                {
+                    "error":
+                        "manager_or_owner_required"
+                },
+            )
+
+        return _handle_lead_status_change(
+            event,
+            identity["subject"],
+        )
+
+    if (
+        method == "POST"
+        and "/v1/admin/leads/" in path
+        and path.endswith("/convert")
+    ):
+        if identity["role"] not in {
+            "OWNER",
+            "MANAGER",
+        }:
+            return _response(
+                403,
+                {
+                    "error":
+                        "manager_or_owner_required"
+                },
+            )
+
+        return _handle_convert_lead(
+            event,
+            identity["subject"],
+        )
+
+    if (
+        method == "GET"
+        and path.endswith(
+            "/v1/admin/projects"
+        )
+    ):
+        if identity["role"] not in {
+            "OWNER",
+            "MANAGER",
+        }:
+            return _response(
+                403,
+                {
+                    "error":
+                        "manager_or_owner_required"
+                },
+            )
+
+        return _handle_list_projects()
+
+    if (
+        method == "GET"
+        and "/v1/admin/projects/" in path
+    ):
+        if identity["role"] not in {
+            "OWNER",
+            "MANAGER",
+        }:
+            return _response(
+                403,
+                {
+                    "error":
+                        "manager_or_owner_required"
+                },
+            )
+
+        return _handle_get_project(
             event
         )
 
