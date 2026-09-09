@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import base64
 import json
 import logging
 import os
+from datetime import datetime, timezone
 from typing import Any
 
 import boto3
@@ -14,6 +16,10 @@ LOGGER.setLevel(os.getenv("LOG_LEVEL", "INFO"))
 
 STAGE = os.environ.get("STAGE", "dev")
 OPS_TABLE_NAME = os.environ.get("OPS_TABLE_NAME", "")
+STAFF_USER_POOL_ID = os.environ.get(
+    "STAFF_USER_POOL_ID",
+    "",
+)
 
 ORGANIZATION_ROLES = (
     "OWNER",
@@ -23,7 +29,13 @@ ORGANIZATION_ROLES = (
 
 ROLE_PRECEDENCE = ORGANIZATION_ROLES
 
+STAFF_STATUSES = (
+    "ACTIVE",
+    "DISABLED",
+)
+
 _ops_table_instance = None
+_cognito_client_instance = None
 
 
 def _response(
@@ -33,7 +45,8 @@ def _response(
     return {
         "statusCode": status,
         "headers": {
-            "content-type": "application/json; charset=utf-8",
+            "content-type":
+                "application/json; charset=utf-8",
             "cache-control": "no-store",
             "x-content-type-options": "nosniff",
         },
@@ -42,6 +55,13 @@ def _response(
             ensure_ascii=False,
         ),
     }
+
+
+def _utcnow() -> str:
+    return (
+        datetime.now(timezone.utc)
+        .isoformat()
+    )
 
 
 def _ops_table():
@@ -61,6 +81,22 @@ def _ops_table():
     return _ops_table_instance
 
 
+def _cognito():
+    global _cognito_client_instance
+
+    if not STAFF_USER_POOL_ID:
+        raise RuntimeError(
+            "staff_user_pool_not_configured"
+        )
+
+    if _cognito_client_instance is None:
+        _cognito_client_instance = (
+            boto3.client("cognito-idp")
+        )
+
+    return _cognito_client_instance
+
+
 def _staff_record(
     subject: str,
 ) -> dict[str, Any] | None:
@@ -78,6 +114,52 @@ def _staff_record(
         return None
 
     return item
+
+
+def _list_staff_records() -> list[dict[str, Any]]:
+    items: list[dict[str, Any]] = []
+    last_key = None
+
+    while True:
+        kwargs: dict[str, Any] = {
+            "IndexName": "GSI2",
+            "KeyConditionExpression":
+                "GSI2PK = :staff",
+            "ExpressionAttributeValues": {
+                ":staff": "STAFF",
+            },
+        }
+
+        if last_key:
+            kwargs["ExclusiveStartKey"] = last_key
+
+        response = _ops_table().query(
+            **kwargs
+        )
+
+        page = response.get("Items") or []
+
+        items.extend(
+            item
+            for item in page
+            if isinstance(item, dict)
+        )
+
+        last_key = response.get(
+            "LastEvaluatedKey"
+        )
+
+        if not last_key:
+            break
+
+    return sorted(
+        items,
+        key=lambda item: str(
+            item.get("displayName")
+            or item.get("email")
+            or ""
+        ).casefold(),
+    )
 
 
 def _claims(
@@ -169,44 +251,73 @@ def _effective_role(
     return None
 
 
-def handler(
-    event: dict[str, Any],
-    context: Any,
+def _authz_version(
+    staff: dict[str, Any],
+) -> int:
+    try:
+        return int(
+            staff.get("authzVersion")
+            or 1
+        )
+    except (TypeError, ValueError):
+        return 1
+
+
+def _staff_id(
+    staff: dict[str, Any],
+) -> str:
+    pk = str(
+        staff.get("PK")
+        or ""
+    )
+
+    if pk.startswith("USER#"):
+        return pk[5:]
+
+    return ""
+
+
+def _public_staff(
+    staff: dict[str, Any],
 ) -> dict[str, Any]:
-    request_context = (
-        event.get("requestContext")
-        or {}
-    )
+    return {
+        "id": _staff_id(staff),
+        "displayName": str(
+            staff.get("displayName")
+            or ""
+        ),
+        "email": str(
+            staff.get("email")
+            or ""
+        ),
+        "role": str(
+            staff.get("organizationRole")
+            or ""
+        ),
+        "status": str(
+            staff.get("status")
+            or ""
+        ),
+        "authzVersion":
+            _authz_version(staff),
+        "preferredLocale": str(
+            staff.get("preferredLocale")
+            or "en"
+        ),
+        "createdAt": str(
+            staff.get("createdAt")
+            or ""
+        ),
+        "updatedAt": str(
+            staff.get("updatedAt")
+            or ""
+        ),
+    }
 
-    http = (
-        request_context.get("http")
-        or {}
-    )
 
-    method = (
-        http.get("method")
-        or event.get("httpMethod")
-        or ""
-    )
-
-    path = (
-        http.get("path")
-        or event.get("rawPath")
-        or event.get("path")
-        or ""
-    )
-
-    if (
-        method != "GET"
-        or not path.endswith(
-            "/v1/admin/me"
-        )
-    ):
-        return _response(
-            404,
-            {"error": "not_found"},
-        )
-
+def _authorize_identity(
+    event: dict[str, Any],
+):
     claims = _claims(event)
 
     subject = str(
@@ -215,7 +326,7 @@ def handler(
     ).strip()
 
     if not subject:
-        return _response(
+        return None, _response(
             401,
             {"error": "unauthorized"},
         )
@@ -226,7 +337,7 @@ def handler(
     ).strip()
 
     if token_use != "access":
-        return _response(
+        return None, _response(
             401,
             {"error": "invalid_token_type"},
         )
@@ -236,7 +347,7 @@ def handler(
     )
 
     if not identity_role:
-        return _response(
+        return None, _response(
             403,
             {"error": "staff_role_required"},
         )
@@ -254,13 +365,13 @@ def handler(
             type(exc).__name__,
         )
 
-        return _response(
+        return None, _response(
             503,
             {"error": "temporarily_unavailable"},
         )
 
     if not staff:
-        return _response(
+        return None, _response(
             403,
             {"error": "staff_profile_required"},
         )
@@ -271,30 +382,605 @@ def handler(
     ).strip().upper()
 
     if status != "ACTIVE":
-        return _response(
+        return None, _response(
             403,
             {"error": "staff_disabled"},
         )
 
-    # OpsTable is authoritative for current organization role.
     role = str(
         staff.get("organizationRole")
         or ""
     ).strip().upper()
 
     if role not in ORGANIZATION_ROLES:
-        return _response(
+        return None, _response(
             403,
             {"error": "invalid_staff_role"},
         )
 
+    return {
+        "subject": subject,
+        "claims": claims,
+        "profile": staff,
+        "role": role,
+    }, None
+
+
+def _request_body(
+    event: dict[str, Any],
+) -> dict[str, Any] | None:
+    raw = event.get("body")
+
+    if not isinstance(raw, str):
+        return None
+
     try:
-        authz_version = int(
-            staff.get("authzVersion")
-            or 1
+        if event.get("isBase64Encoded"):
+            raw = (
+                base64.b64decode(raw)
+                .decode("utf-8")
+            )
+
+        parsed = json.loads(raw)
+
+    except (
+        ValueError,
+        UnicodeDecodeError,
+    ):
+        return None
+
+    if not isinstance(parsed, dict):
+        return None
+
+    return parsed
+
+
+def _normalize_email(
+    value: Any,
+) -> str | None:
+    email = str(
+        value
+        or ""
+    ).strip().lower()
+
+    if (
+        not email
+        or len(email) > 254
+        or " " in email
+        or email.count("@") != 1
+    ):
+        return None
+
+    local, domain = email.split(
+        "@",
+        1,
+    )
+
+    if (
+        not local
+        or not domain
+        or "." not in domain
+    ):
+        return None
+
+    return email
+
+
+def _normalize_display_name(
+    value: Any,
+) -> str | None:
+    name = " ".join(
+        str(
+            value
+            or ""
+        ).split()
+    )
+
+    if (
+        not name
+        or len(name) > 120
+    ):
+        return None
+
+    return name
+
+
+def _normalize_role(
+    value: Any,
+) -> str | None:
+    role = str(
+        value
+        or ""
+    ).strip().upper()
+
+    if role not in ORGANIZATION_ROLES:
+        return None
+
+    return role
+
+
+def _normalize_locale(
+    value: Any,
+) -> str | None:
+    locale = str(
+        value
+        or "en"
+    ).strip().lower()
+
+    if locale not in {
+        "en",
+        "id",
+    }:
+        return None
+
+    return locale
+
+
+def _cognito_sub(
+    user: dict[str, Any],
+) -> str:
+    for attribute in (
+        user.get("Attributes")
+        or []
+    ):
+        if (
+            attribute.get("Name")
+            == "sub"
+        ):
+            return str(
+                attribute.get("Value")
+                or ""
+            )
+
+    return ""
+
+
+def _gsi_staff_sort_key(
+    role: str,
+    staff: dict[str, Any],
+    subject: str,
+) -> str:
+    name = str(
+        staff.get("displayName")
+        or staff.get("email")
+        or subject
+    ).strip().upper()
+
+    return (
+        f"ROLE#{role}"
+        f"#NAME#{name}"
+        f"#USER#{subject}"
+    )
+
+
+def _create_staff(
+    actor_subject: str,
+    display_name: str,
+    email: str,
+    role: str,
+    locale: str,
+) -> dict[str, Any]:
+    client = _cognito()
+    username = ""
+
+    try:
+        created = client.admin_create_user(
+            UserPoolId=STAFF_USER_POOL_ID,
+            Username=email,
+            UserAttributes=[
+                {
+                    "Name": "email",
+                    "Value": email,
+                },
+                {
+                    "Name": "email_verified",
+                    "Value": "true",
+                },
+            ],
+            DesiredDeliveryMediums=[
+                "EMAIL",
+            ],
         )
-    except (TypeError, ValueError):
-        authz_version = 1
+
+        user = (
+            created.get("User")
+            or {}
+        )
+
+        username = str(
+            user.get("Username")
+            or ""
+        )
+
+        subject = _cognito_sub(user)
+
+        if (
+            not username
+            or not subject
+        ):
+            raise RuntimeError(
+                "cognito_identity_incomplete"
+            )
+
+        client.admin_add_user_to_group(
+            UserPoolId=STAFF_USER_POOL_ID,
+            Username=username,
+            GroupName=role,
+        )
+
+        now = _utcnow()
+
+        item = {
+            "PK": f"USER#{subject}",
+            "SK": "PROFILE",
+            "recordType": "STAFF_USER",
+            "cognitoUsername": username,
+            "displayName": display_name,
+            "email": email,
+            "organizationRole": role,
+            "status": "ACTIVE",
+            "authzVersion": 1,
+            "preferredLocale": locale,
+            "GSI2PK": "STAFF",
+            "GSI2SK": (
+                f"ROLE#{role}"
+                f"#NAME#{display_name.upper()}"
+                f"#USER#{subject}"
+            ),
+            "createdBy": actor_subject,
+            "updatedBy": actor_subject,
+            "createdAt": now,
+            "updatedAt": now,
+        }
+
+        _ops_table().put_item(
+            Item=item,
+            ConditionExpression=(
+                "attribute_not_exists(PK)"
+            ),
+        )
+
+        LOGGER.info(
+            "staff_admin action=create "
+            "actor=%s target=%s role=%s",
+            actor_subject,
+            subject,
+            role,
+        )
+
+        return item
+
+    except Exception:
+        if username:
+            try:
+                client.admin_delete_user(
+                    UserPoolId=
+                        STAFF_USER_POOL_ID,
+                    Username=username,
+                )
+            except Exception:
+                LOGGER.exception(
+                    "Failed rollback of "
+                    "Cognito staff user"
+                )
+
+        raise
+
+
+def _sync_cognito_role(
+    staff: dict[str, Any],
+    subject: str,
+    role: str,
+) -> bool:
+    username = str(
+        staff.get("cognitoUsername")
+        or subject
+    )
+
+    client = _cognito()
+
+    try:
+        response = (
+            client
+            .admin_list_groups_for_user(
+                UserPoolId=
+                    STAFF_USER_POOL_ID,
+                Username=username,
+            )
+        )
+
+        current_groups = {
+            str(
+                group.get("GroupName")
+                or ""
+            )
+            for group in (
+                response.get("Groups")
+                or []
+            )
+        }
+
+        for existing_role in (
+            ORGANIZATION_ROLES
+        ):
+            if (
+                existing_role
+                in current_groups
+                and existing_role != role
+            ):
+                client.admin_remove_user_from_group(
+                    UserPoolId=
+                        STAFF_USER_POOL_ID,
+                    Username=username,
+                    GroupName=existing_role,
+                )
+
+        if role not in current_groups:
+            client.admin_add_user_to_group(
+                UserPoolId=
+                    STAFF_USER_POOL_ID,
+                Username=username,
+                GroupName=role,
+            )
+
+        try:
+            client.admin_user_global_sign_out(
+                UserPoolId=
+                    STAFF_USER_POOL_ID,
+                Username=username,
+            )
+        except ClientError:
+            LOGGER.warning(
+                "Global sign-out failed "
+                "during role sync target=%s",
+                subject,
+            )
+
+        return True
+
+    except (
+        BotoCoreError,
+        ClientError,
+        RuntimeError,
+    ):
+        LOGGER.exception(
+            "Cognito role sync failed "
+            "target=%s role=%s",
+            subject,
+            role,
+        )
+
+        return False
+
+
+def _set_staff_role(
+    actor_subject: str,
+    subject: str,
+    staff: dict[str, Any],
+    role: str,
+):
+    now = _utcnow()
+
+    updated = _ops_table().update_item(
+        Key={
+            "PK": f"USER#{subject}",
+            "SK": "PROFILE",
+        },
+        UpdateExpression=(
+            "SET organizationRole = :role, "
+            "GSI2SK = :gsi, "
+            "updatedAt = :updated, "
+            "updatedBy = :actor "
+            "ADD authzVersion :one"
+        ),
+        ExpressionAttributeValues={
+            ":role": role,
+            ":gsi": _gsi_staff_sort_key(
+                role,
+                staff,
+                subject,
+            ),
+            ":updated": now,
+            ":actor": actor_subject,
+            ":one": 1,
+        },
+        ConditionExpression=(
+            "attribute_exists(PK) "
+            "AND attribute_exists(SK)"
+        ),
+        ReturnValues="ALL_NEW",
+    )["Attributes"]
+
+    synced = _sync_cognito_role(
+        updated,
+        subject,
+        role,
+    )
+
+    LOGGER.info(
+        "staff_admin action=role_change "
+        "actor=%s target=%s role=%s "
+        "identity_sync=%s",
+        actor_subject,
+        subject,
+        role,
+        synced,
+    )
+
+    return updated, synced
+
+
+def _disable_cognito_user(
+    staff: dict[str, Any],
+    subject: str,
+) -> bool:
+    username = str(
+        staff.get("cognitoUsername")
+        or subject
+    )
+
+    client = _cognito()
+    synced = True
+
+    try:
+        client.admin_user_global_sign_out(
+            UserPoolId=STAFF_USER_POOL_ID,
+            Username=username,
+        )
+    except ClientError:
+        synced = False
+
+        LOGGER.warning(
+            "Global sign-out failed "
+            "target=%s",
+            subject,
+        )
+
+    try:
+        client.admin_disable_user(
+            UserPoolId=STAFF_USER_POOL_ID,
+            Username=username,
+        )
+    except (
+        BotoCoreError,
+        ClientError,
+    ):
+        synced = False
+
+        LOGGER.exception(
+            "Cognito disable failed "
+            "target=%s",
+            subject,
+        )
+
+    return synced
+
+
+def _enable_cognito_user(
+    staff: dict[str, Any],
+    subject: str,
+) -> None:
+    username = str(
+        staff.get("cognitoUsername")
+        or subject
+    )
+
+    _cognito().admin_enable_user(
+        UserPoolId=STAFF_USER_POOL_ID,
+        Username=username,
+    )
+
+
+def _update_staff_status_record(
+    actor_subject: str,
+    subject: str,
+    status: str,
+):
+    return _ops_table().update_item(
+        Key={
+            "PK": f"USER#{subject}",
+            "SK": "PROFILE",
+        },
+        UpdateExpression=(
+            "SET #status = :status, "
+            "updatedAt = :updated, "
+            "updatedBy = :actor "
+            "ADD authzVersion :one"
+        ),
+        ExpressionAttributeNames={
+            "#status": "status",
+        },
+        ExpressionAttributeValues={
+            ":status": status,
+            ":updated": _utcnow(),
+            ":actor": actor_subject,
+            ":one": 1,
+        },
+        ConditionExpression=(
+            "attribute_exists(PK) "
+            "AND attribute_exists(SK)"
+        ),
+        ReturnValues="ALL_NEW",
+    )["Attributes"]
+
+
+def _set_staff_status(
+    actor_subject: str,
+    subject: str,
+    staff: dict[str, Any],
+    status: str,
+):
+    current_status = str(
+        staff.get("status")
+        or ""
+    ).upper()
+
+    if status == "DISABLED":
+        if current_status == status:
+            updated = staff
+        else:
+            updated = (
+                _update_staff_status_record(
+                    actor_subject,
+                    subject,
+                    status,
+                )
+            )
+
+        synced = _disable_cognito_user(
+            updated,
+            subject,
+        )
+
+    else:
+        _enable_cognito_user(
+            staff,
+            subject,
+        )
+
+        if current_status == status:
+            updated = staff
+        else:
+            updated = (
+                _update_staff_status_record(
+                    actor_subject,
+                    subject,
+                    status,
+                )
+            )
+
+        synced = True
+
+    LOGGER.info(
+        "staff_admin action=status_change "
+        "actor=%s target=%s status=%s "
+        "identity_sync=%s",
+        actor_subject,
+        subject,
+        status,
+        synced,
+    )
+
+    return updated, synced
+
+
+def _aws_error_code(
+    exc: ClientError,
+) -> str:
+    return str(
+        (
+            exc.response.get("Error")
+            or {}
+        ).get("Code")
+        or ""
+    )
+
+
+def _me_response(
+    identity: dict[str, Any],
+) -> dict[str, Any]:
+    claims = identity["claims"]
+    staff = identity["profile"]
 
     username = str(
         claims.get("username")
@@ -302,29 +988,472 @@ def handler(
         or ""
     ).strip()
 
+    user = _public_staff(staff)
+    user["username"] = username
+
     return _response(
         200,
         {
             "ok": True,
             "stage": STAGE,
-            "user": {
-                "id": subject,
-                "username": username,
-                "displayName": str(
-                    staff.get("displayName")
-                    or ""
-                ),
-                "email": str(
-                    staff.get("email")
-                    or ""
-                ),
-                "role": role,
-                "status": status,
-                "authzVersion": authz_version,
-                "preferredLocale": str(
-                    staff.get("preferredLocale")
-                    or "en"
-                ),
-            },
+            "user": user,
         },
+    )
+
+
+def _handle_list_staff():
+    try:
+        staff = _list_staff_records()
+
+    except (
+        BotoCoreError,
+        ClientError,
+        RuntimeError,
+    ):
+        LOGGER.exception(
+            "Failed to list staff"
+        )
+
+        return _response(
+            503,
+            {"error": "temporarily_unavailable"},
+        )
+
+    return _response(
+        200,
+        {
+            "items": [
+                _public_staff(item)
+                for item in staff
+            ],
+            "count": len(staff),
+        },
+    )
+
+
+def _handle_create_staff(
+    event: dict[str, Any],
+    actor_subject: str,
+):
+    body = _request_body(event)
+
+    if body is None:
+        return _response(
+            400,
+            {"error": "invalid_json"},
+        )
+
+    email = _normalize_email(
+        body.get("email")
+    )
+
+    display_name = (
+        _normalize_display_name(
+            body.get("displayName")
+        )
+    )
+
+    role = _normalize_role(
+        body.get(
+            "role",
+            "WORKER",
+        )
+    )
+
+    locale = _normalize_locale(
+        body.get(
+            "preferredLocale",
+            "en",
+        )
+    )
+
+    if not email:
+        return _response(
+            400,
+            {"error": "invalid_email"},
+        )
+
+    if not display_name:
+        return _response(
+            400,
+            {"error": "invalid_display_name"},
+        )
+
+    if not role:
+        return _response(
+            400,
+            {"error": "invalid_role"},
+        )
+
+    if not locale:
+        return _response(
+            400,
+            {"error": "invalid_locale"},
+        )
+
+    try:
+        staff = _create_staff(
+            actor_subject,
+            display_name,
+            email,
+            role,
+            locale,
+        )
+
+    except ClientError as exc:
+        code = _aws_error_code(exc)
+
+        if code in {
+            "UsernameExistsException",
+            "AliasExistsException",
+        }:
+            return _response(
+                409,
+                {
+                    "error":
+                        "staff_already_exists"
+                },
+            )
+
+        LOGGER.exception(
+            "Cognito staff creation failed "
+            "code=%s",
+            code,
+        )
+
+        return _response(
+            503,
+            {"error": "temporarily_unavailable"},
+        )
+
+    except (
+        BotoCoreError,
+        RuntimeError,
+    ):
+        LOGGER.exception(
+            "Staff creation failed"
+        )
+
+        return _response(
+            503,
+            {"error": "temporarily_unavailable"},
+        )
+
+    return _response(
+        201,
+        {
+            "staff": _public_staff(staff),
+            "invitationSent": True,
+        },
+    )
+
+
+def _target_user_id(
+    event: dict[str, Any],
+) -> str:
+    path_parameters = (
+        event.get("pathParameters")
+        or {}
+    )
+
+    return str(
+        path_parameters.get("userId")
+        or ""
+    ).strip()
+
+
+def _handle_role_change(
+    event: dict[str, Any],
+    actor_subject: str,
+):
+    subject = _target_user_id(event)
+
+    if not subject:
+        return _response(
+            400,
+            {"error": "user_id_required"},
+        )
+
+    body = _request_body(event)
+
+    if body is None:
+        return _response(
+            400,
+            {"error": "invalid_json"},
+        )
+
+    role = _normalize_role(
+        body.get("role")
+    )
+
+    if not role:
+        return _response(
+            400,
+            {"error": "invalid_role"},
+        )
+
+    if (
+        subject == actor_subject
+        and role != "OWNER"
+    ):
+        return _response(
+            409,
+            {
+                "error":
+                    "cannot_change_own_role"
+            },
+        )
+
+    try:
+        staff = _staff_record(subject)
+
+        if not staff:
+            return _response(
+                404,
+                {"error": "staff_not_found"},
+            )
+
+        current_role = str(
+            staff.get("organizationRole")
+            or ""
+        ).upper()
+
+        if current_role == role:
+            synced = _sync_cognito_role(
+                staff,
+                subject,
+                role,
+            )
+
+            status_code = (
+                200 if synced else 202
+            )
+
+            return _response(
+                status_code,
+                {
+                    "staff":
+                        _public_staff(staff),
+                    "identitySync":
+                        (
+                            "OK"
+                            if synced
+                            else "PENDING"
+                        ),
+                },
+            )
+
+        updated, synced = (
+            _set_staff_role(
+                actor_subject,
+                subject,
+                staff,
+                role,
+            )
+        )
+
+    except (
+        BotoCoreError,
+        ClientError,
+        RuntimeError,
+    ):
+        LOGGER.exception(
+            "Staff role update failed"
+        )
+
+        return _response(
+            503,
+            {"error": "temporarily_unavailable"},
+        )
+
+    return _response(
+        200 if synced else 202,
+        {
+            "staff": _public_staff(
+                updated
+            ),
+            "identitySync": (
+                "OK"
+                if synced
+                else "PENDING"
+            ),
+        },
+    )
+
+
+def _handle_status_change(
+    event: dict[str, Any],
+    actor_subject: str,
+):
+    subject = _target_user_id(event)
+
+    if not subject:
+        return _response(
+            400,
+            {"error": "user_id_required"},
+        )
+
+    body = _request_body(event)
+
+    if body is None:
+        return _response(
+            400,
+            {"error": "invalid_json"},
+        )
+
+    status = str(
+        body.get("status")
+        or ""
+    ).strip().upper()
+
+    if status not in STAFF_STATUSES:
+        return _response(
+            400,
+            {"error": "invalid_status"},
+        )
+
+    if (
+        subject == actor_subject
+        and status == "DISABLED"
+    ):
+        return _response(
+            409,
+            {
+                "error":
+                    "cannot_disable_self"
+            },
+        )
+
+    try:
+        staff = _staff_record(subject)
+
+        if not staff:
+            return _response(
+                404,
+                {"error": "staff_not_found"},
+            )
+
+        updated, synced = (
+            _set_staff_status(
+                actor_subject,
+                subject,
+                staff,
+                status,
+            )
+        )
+
+    except (
+        BotoCoreError,
+        ClientError,
+        RuntimeError,
+    ):
+        LOGGER.exception(
+            "Staff status update failed"
+        )
+
+        return _response(
+            503,
+            {"error": "temporarily_unavailable"},
+        )
+
+    return _response(
+        200 if synced else 202,
+        {
+            "staff": _public_staff(
+                updated
+            ),
+            "identitySync": (
+                "OK"
+                if synced
+                else "PENDING"
+            ),
+        },
+    )
+
+
+def handler(
+    event: dict[str, Any],
+    context: Any,
+) -> dict[str, Any]:
+    request_context = (
+        event.get("requestContext")
+        or {}
+    )
+
+    http = (
+        request_context.get("http")
+        or {}
+    )
+
+    method = str(
+        http.get("method")
+        or event.get("httpMethod")
+        or ""
+    ).upper()
+
+    path = str(
+        http.get("path")
+        or event.get("rawPath")
+        or event.get("path")
+        or ""
+    )
+
+    identity, error = (
+        _authorize_identity(event)
+    )
+
+    if error:
+        return error
+
+    assert identity is not None
+
+    if (
+        method == "GET"
+        and path.endswith(
+            "/v1/admin/me"
+        )
+    ):
+        return _me_response(identity)
+
+    if identity["role"] != "OWNER":
+        return _response(
+            403,
+            {"error": "owner_required"},
+        )
+
+    actor_subject = identity["subject"]
+
+    if path.endswith(
+        "/v1/admin/staff"
+    ):
+        if method == "GET":
+            return _handle_list_staff()
+
+        if method == "POST":
+            return _handle_create_staff(
+                event,
+                actor_subject,
+            )
+
+    if (
+        method == "PATCH"
+        and path.endswith("/role")
+    ):
+        return _handle_role_change(
+            event,
+            actor_subject,
+        )
+
+    if (
+        method == "PATCH"
+        and path.endswith("/status")
+    ):
+        return _handle_status_change(
+            event,
+            actor_subject,
+        )
+
+    return _response(
+        404,
+        {"error": "not_found"},
     )

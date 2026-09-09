@@ -62,6 +62,7 @@ Resources:
   BriefApi:
     Type: AWS::Serverless::HttpApi
     Properties:
+      Name: !Sub kasane-public-${StageName}
       StageName: !Ref StageName
       CorsConfiguration:
         AllowOrigins: !Ref AllowedOrigins
@@ -157,12 +158,15 @@ Resources:
   AdminApi:
     Type: AWS::Serverless::HttpApi
     Properties:
+      Name: !Sub kasane-admin-${StageName}
       StageName: !Ref StageName
 
       CorsConfiguration:
         AllowOrigins: !Ref AdminAllowedOrigins
         AllowMethods:
           - GET
+          - POST
+          - PATCH
           - OPTIONS
         AllowHeaders:
           - authorization
@@ -384,17 +388,57 @@ Resources:
           STAGE: !Ref StageName
 
       Policies:
-        - DynamoDBReadPolicy:
+        - DynamoDBCrudPolicy:
             TableName: !Ref OpsTable
+
+        - Statement:
+            - Effect: Allow
+              Action:
+                - cognito-idp:AdminCreateUser
+                - cognito-idp:AdminDeleteUser
+                - cognito-idp:AdminAddUserToGroup
+                - cognito-idp:AdminRemoveUserFromGroup
+                - cognito-idp:AdminListGroupsForUser
+                - cognito-idp:AdminDisableUser
+                - cognito-idp:AdminEnableUser
+                - cognito-idp:AdminUserGlobalSignOut
+              Resource: !GetAtt StaffUserPool.Arn
 
       Events:
         CurrentStaffMember:
           Type: HttpApi
-
           Properties:
             ApiId: !Ref AdminApi
             Path: /v1/admin/me
             Method: GET
+
+        ListStaff:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref AdminApi
+            Path: /v1/admin/staff
+            Method: GET
+
+        CreateStaff:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref AdminApi
+            Path: /v1/admin/staff
+            Method: POST
+
+        ChangeStaffRole:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref AdminApi
+            Path: /v1/admin/staff/{userId}/role
+            Method: PATCH
+
+        ChangeStaffStatus:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref AdminApi
+            Path: /v1/admin/staff/{userId}/status
+            Method: PATCH
 
 
   TurnstileSecret:
