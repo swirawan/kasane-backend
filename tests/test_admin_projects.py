@@ -359,3 +359,282 @@ def test_worker_cannot_list_all_projects():
         )
 
     assert response["statusCode"] == 403
+
+def test_project_color_defaults_by_project_id():
+    first = project()
+
+    second = project()
+    second["PK"] = "PROJECT#KAS-002"
+    second["projectId"] = "KAS-002"
+
+    third = project()
+    third["PK"] = "PROJECT#KAS-003"
+    third["projectId"] = "KAS-003"
+
+    assert (
+        admin_app._public_project(first)
+        ["projectColor"]
+        == "RUST"
+    )
+
+    assert (
+        admin_app._public_project(second)
+        ["projectColor"]
+        == "BLUE"
+    )
+
+    assert (
+        admin_app._public_project(third)
+        ["projectColor"]
+        == "OLIVE"
+    )
+
+
+def test_project_color_persisted_override_wins():
+    item = project()
+    item["projectColor"] = "PLUM"
+
+    result = admin_app._public_project(
+        item
+    )
+
+    assert result["projectColor"] == "PLUM"
+
+
+def test_owner_can_change_project_color():
+    updated = project()
+    updated["projectColor"] = "PLUM"
+
+    with patch.object(
+        admin_app,
+        "_authorize_identity",
+        return_value=(
+            identity("OWNER"),
+            None,
+        ),
+    ), patch.object(
+        admin_app,
+        "_update_project_color",
+        return_value=updated,
+    ) as update_color:
+        response = admin_app.handler(
+            event(
+                "PATCH",
+                "/v1/admin/projects/"
+                "KAS-001/color",
+                project_id="KAS-001",
+                payload={
+                    "color": "plum",
+                },
+            ),
+            None,
+        )
+
+    assert response["statusCode"] == 200
+
+    assert (
+        body(response)["project"]
+        ["projectColor"]
+        == "PLUM"
+    )
+
+    update_color.assert_called_once_with(
+        "KAS-001",
+        "PLUM",
+        "user-1",
+    )
+
+
+def test_invalid_project_color_rejected():
+    with patch.object(
+        admin_app,
+        "_authorize_identity",
+        return_value=(
+            identity("OWNER"),
+            None,
+        ),
+    ):
+        response = admin_app.handler(
+            event(
+                "PATCH",
+                "/v1/admin/projects/"
+                "KAS-001/color",
+                project_id="KAS-001",
+                payload={
+                    "color": "NEON",
+                },
+            ),
+            None,
+        )
+
+    assert response["statusCode"] == 400
+
+    result = body(response)
+
+    assert (
+        result["error"]
+        == "invalid_project_color"
+    )
+
+    assert "RUST" in result["allowed"]
+    assert "BLUE" in result["allowed"]
+    assert "OLIVE" in result["allowed"]
+
+
+def test_worker_cannot_change_project_color():
+    with patch.object(
+        admin_app,
+        "_authorize_identity",
+        return_value=(
+            identity("WORKER"),
+            None,
+        ),
+    ):
+        response = admin_app.handler(
+            event(
+                "PATCH",
+                "/v1/admin/projects/"
+                "KAS-001/color",
+                project_id="KAS-001",
+                payload={
+                    "color": "BLUE",
+                },
+            ),
+            None,
+        )
+
+    assert response["statusCode"] == 403
+
+    assert (
+        body(response)["error"]
+        == "manager_or_owner_required"
+    )
+
+
+def test_missing_project_color_update_returns_404():
+    missing = admin_app.ClientError(
+        {
+            "Error": {
+                "Code":
+                    "ConditionalCheckFailedException",
+                "Message":
+                    "Project does not exist",
+            },
+        },
+        "UpdateItem",
+    )
+
+    with patch.object(
+        admin_app,
+        "_authorize_identity",
+        return_value=(
+            identity("OWNER"),
+            None,
+        ),
+    ), patch.object(
+        admin_app,
+        "_update_project_color",
+        side_effect=missing,
+    ):
+        response = admin_app.handler(
+            event(
+                "PATCH",
+                "/v1/admin/projects/"
+                "KAS-999/color",
+                project_id="KAS-999",
+                payload={
+                    "color": "GOLD",
+                },
+            ),
+            None,
+        )
+
+    assert response["statusCode"] == 404
+
+    assert (
+        body(response)["error"]
+        == "project_not_found"
+    )
+
+
+def test_project_color_update_records_audit():
+    updated = project()
+    updated["projectColor"] = "TEAL"
+    updated["updatedAt"] = (
+        "2026-09-09T18:50:00+00:00"
+    )
+    updated["updatedBy"] = "user-1"
+
+    with patch.object(
+        admin_app,
+        "_ops_table",
+    ) as table_factory, patch.object(
+        admin_app,
+        "_utcnow",
+        return_value=(
+            "2026-09-09T18:50:00+00:00"
+        ),
+    ), patch.object(
+        admin_app,
+        "_record_activity",
+    ) as record_activity:
+        table = table_factory.return_value
+
+        table.update_item.return_value = {
+            "Attributes": updated,
+        }
+
+        result = (
+            admin_app._update_project_color(
+                "KAS-001",
+                "TEAL",
+                "user-1",
+            )
+        )
+
+    assert result["projectColor"] == "TEAL"
+
+    kwargs = (
+        table.update_item
+        .call_args.kwargs
+    )
+
+    assert kwargs["Key"] == {
+        "PK": "PROJECT#KAS-001",
+        "SK": "META",
+    }
+
+    values = (
+        kwargs[
+            "ExpressionAttributeValues"
+        ]
+    )
+
+    assert values[":color"] == "TEAL"
+
+    assert (
+        values[":updated"]
+        == "2026-09-09T18:50:00+00:00"
+    )
+
+    assert values[":actor"] == "user-1"
+
+    record_activity.assert_called_once()
+
+    activity_args = (
+        record_activity
+        .call_args.args
+    )
+
+    assert activity_args[0] == "KAS-001"
+    assert activity_args[1] == "user-1"
+
+    assert (
+        activity_args[2]
+        == "PROJECT_COLOR_CHANGED"
+    )
+
+    assert (
+        activity_args[4]["projectColor"]
+        == "TEAL"
+    )

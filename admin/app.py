@@ -502,6 +502,68 @@ def _next_project_id() -> str:
     return f"KAS-{number:03d}"
 
 
+PROJECT_COLORS = (
+    "RUST",
+    "BLUE",
+    "OLIVE",
+    "GOLD",
+    "PLUM",
+    "TEAL",
+    "ROSE",
+    "STONE",
+)
+
+
+def _normalize_project_color(
+    value: Any,
+) -> str:
+    color = str(
+        value or ""
+    ).strip().upper()
+
+    if color not in PROJECT_COLORS:
+        return ""
+
+    return color
+
+
+def _default_project_color(
+    project_id: str,
+) -> str:
+    suffix = str(
+        project_id or ""
+    ).rsplit("-", 1)[-1]
+
+    try:
+        number = int(suffix)
+    except ValueError:
+        number = 1
+
+    index = (
+        max(number, 1) - 1
+    ) % len(PROJECT_COLORS)
+
+    return PROJECT_COLORS[index]
+
+
+def _project_color(
+    item: dict[str, Any],
+) -> str:
+    stored = _normalize_project_color(
+        item.get("projectColor")
+    )
+
+    if stored:
+        return stored
+
+    return _default_project_color(
+        str(
+            item.get("projectId")
+            or ""
+        )
+    )
+
+
 def _public_project(
     item: dict[str, Any],
 ) -> dict[str, Any]:
@@ -522,6 +584,8 @@ def _public_project(
             item.get("phase")
             or ""
         ),
+        "projectColor":
+            _project_color(item),
         "leadReference": str(
             item.get("leadReference")
             or ""
@@ -567,6 +631,176 @@ def _public_project(
             or ""
         ),
     }
+
+
+def _update_project_color(
+    project_id: str,
+    color: str,
+    actor_subject: str,
+) -> dict[str, Any]:
+    now = _utcnow()
+
+    response = _ops_table().update_item(
+        Key={
+            "PK":
+                f"PROJECT#{project_id}",
+            "SK":
+                "META",
+        },
+        UpdateExpression=(
+            "SET "
+            "projectColor = :color, "
+            "updatedAt = :updated, "
+            "updatedBy = :actor"
+        ),
+        ConditionExpression=(
+            "attribute_exists(PK) "
+            "AND attribute_exists(SK) "
+            "AND recordType = :record_type"
+        ),
+        ExpressionAttributeValues={
+            ":color":
+                color,
+            ":updated":
+                now,
+            ":actor":
+                actor_subject,
+            ":record_type":
+                "PROJECT",
+        },
+        ReturnValues="ALL_NEW",
+    )
+
+    updated = response["Attributes"]
+
+    _record_activity(
+        project_id,
+        actor_subject,
+        "PROJECT_COLOR_CHANGED",
+        (
+            "Changed project color "
+            f"to {color.lower()}"
+        ),
+        {
+            "projectColor":
+                color,
+        },
+    )
+
+    return updated
+
+
+def _handle_update_project_color(
+    event: dict[str, Any],
+    actor_subject: str,
+):
+    parameters = (
+        event.get("pathParameters")
+        or {}
+    )
+
+    project_id = str(
+        parameters.get("projectId")
+        or ""
+    ).strip()
+
+    if not project_id:
+        return _response(
+            400,
+            {
+                "error":
+                    "project_id_required"
+            },
+        )
+
+    body = _request_body(event)
+
+    if body is None:
+        return _response(
+            400,
+            {"error": "invalid_json"},
+        )
+
+    color = _normalize_project_color(
+        body.get("color")
+    )
+
+    if not color:
+        return _response(
+            400,
+            {
+                "error":
+                    "invalid_project_color",
+                "allowed":
+                    list(PROJECT_COLORS),
+            },
+        )
+
+    try:
+        updated = _update_project_color(
+            project_id,
+            color,
+            actor_subject,
+        )
+
+    except ClientError as exc:
+        code = str(
+            exc.response.get(
+                "Error",
+                {}
+            ).get(
+                "Code",
+                ""
+            )
+        )
+
+        if (
+            code
+            == "ConditionalCheckFailedException"
+        ):
+            return _response(
+                404,
+                {
+                    "error":
+                        "project_not_found"
+                },
+            )
+
+        LOGGER.exception(
+            "Failed to update project color"
+        )
+
+        return _response(
+            503,
+            {
+                "error":
+                    "temporarily_unavailable"
+            },
+        )
+
+    except (
+        BotoCoreError,
+        RuntimeError,
+    ):
+        LOGGER.exception(
+            "Failed to update project color"
+        )
+
+        return _response(
+            503,
+            {
+                "error":
+                    "temporarily_unavailable"
+            },
+        )
+
+    return _response(
+        200,
+        {
+            "project":
+                _public_project(updated)
+        },
+    )
 
 
 def _project_record(
@@ -708,6 +942,10 @@ def _convert_lead(
             "name": project_name,
             "status": "ACTIVE",
             "phase": "PLANNING",
+            "projectColor":
+                _default_project_color(
+                    project_id
+                ),
             "leadReference": reference,
             "clientName": client_name,
             "email": str(
@@ -6606,6 +6844,28 @@ def handler(
             )
 
         return _handle_unassign_project_member(
+            event,
+            identity["subject"],
+        )
+
+    if (
+        method == "PATCH"
+        and path.endswith("/color")
+        and "/v1/admin/projects/" in path
+    ):
+        if identity["role"] not in {
+            "OWNER",
+            "MANAGER",
+        }:
+            return _response(
+                403,
+                {
+                    "error":
+                        "manager_or_owner_required"
+                },
+            )
+
+        return _handle_update_project_color(
             event,
             identity["subject"],
         )
