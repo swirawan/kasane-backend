@@ -47,6 +47,18 @@ LEAD_STATUSES = (
     "ON_HOLD",
 )
 
+PROJECT_ROLES = (
+    "PROJECT_LEAD",
+    "COORDINATOR",
+    "WORKER",
+    "FINANCE",
+    "VIEWER",
+    "PRODUCTION",
+    "CREATIVE",
+    "LOGISTICS",
+    "VENDOR_LIAISON",
+)
+
 
 class LeadConversionConflict(RuntimeError):
     pass
@@ -849,6 +861,348 @@ def _convert_lead(
 
     raise RuntimeError(
         "project_conversion_failed"
+    )
+
+
+def _normalize_project_role(
+    value: Any,
+) -> str | None:
+    role = str(
+        value
+        or ""
+    ).strip().upper()
+
+    if role not in PROJECT_ROLES:
+        return None
+
+    return role
+
+
+def _project_member_record(
+    project_id: str,
+    user_id: str,
+) -> dict[str, Any] | None:
+    response = _ops_table().get_item(
+        Key={
+            "PK": f"PROJECT#{project_id}",
+            "SK": f"MEMBER#{user_id}",
+        },
+        ConsistentRead=True,
+    )
+
+    item = response.get("Item")
+
+    if not isinstance(item, dict):
+        return None
+
+    if (
+        item.get("recordType")
+        != "PROJECT_MEMBERSHIP"
+    ):
+        return None
+
+    return item
+
+
+def _public_project_member(
+    membership: dict[str, Any],
+    staff: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    staff = staff or {}
+
+    return {
+        "userId": str(
+            membership.get("userId")
+            or ""
+        ),
+        "projectId": str(
+            membership.get("projectId")
+            or ""
+        ),
+        "displayName": str(
+            staff.get("displayName")
+            or ""
+        ),
+        "email": str(
+            staff.get("email")
+            or ""
+        ),
+        "organizationRole": str(
+            staff.get("organizationRole")
+            or ""
+        ),
+        "staffStatus": str(
+            staff.get("status")
+            or ""
+        ),
+        "projectRole": str(
+            membership.get("projectRole")
+            or ""
+        ),
+        "membershipStatus": str(
+            membership.get(
+                "membershipStatus"
+            )
+            or ""
+        ),
+        "assignedAt": str(
+            membership.get("assignedAt")
+            or ""
+        ),
+        "updatedAt": str(
+            membership.get("updatedAt")
+            or ""
+        ),
+    }
+
+
+def _list_project_members(
+    project_id: str,
+) -> list[dict[str, Any]]:
+    response = _ops_table().query(
+        KeyConditionExpression=(
+            "PK = :pk AND "
+            "begins_with(SK, :member)"
+        ),
+        ExpressionAttributeValues={
+            ":pk":
+                f"PROJECT#{project_id}",
+            ":member": "MEMBER#",
+        },
+        ConsistentRead=True,
+    )
+
+    result = []
+
+    for membership in (
+        response.get("Items")
+        or []
+    ):
+        if (
+            not isinstance(
+                membership,
+                dict,
+            )
+            or membership.get(
+                "recordType"
+            )
+            != "PROJECT_MEMBERSHIP"
+            or membership.get(
+                "membershipStatus"
+            )
+            != "ACTIVE"
+        ):
+            continue
+
+        user_id = str(
+            membership.get("userId")
+            or ""
+        )
+
+        staff = (
+            _staff_record(user_id)
+            if user_id
+            else None
+        )
+
+        result.append(
+            _public_project_member(
+                membership,
+                staff,
+            )
+        )
+
+    return sorted(
+        result,
+        key=lambda item: (
+            item["projectRole"],
+            item["displayName"].casefold(),
+        ),
+    )
+
+
+def _assign_project_member(
+    project_id: str,
+    user_id: str,
+    project_role: str,
+    actor_subject: str,
+) -> tuple[dict[str, Any], bool]:
+    existing = _project_member_record(
+        project_id,
+        user_id,
+    )
+
+    if (
+        existing
+        and existing.get(
+            "membershipStatus"
+        )
+        == "ACTIVE"
+        and existing.get(
+            "projectRole"
+        )
+        == project_role
+    ):
+        return existing, False
+
+    now = _utcnow()
+
+    response = _ops_table().update_item(
+        Key={
+            "PK":
+                f"PROJECT#{project_id}",
+            "SK":
+                f"MEMBER#{user_id}",
+        },
+        UpdateExpression=(
+            "SET "
+            "recordType = :record_type, "
+            "projectId = :project_id, "
+            "userId = :user_id, "
+            "projectRole = :project_role, "
+            "membershipStatus = :active, "
+            "createdAt = if_not_exists("
+            "createdAt, :now), "
+            "createdBy = if_not_exists("
+            "createdBy, :actor), "
+            "assignedAt = :now, "
+            "updatedAt = :now, "
+            "updatedBy = :actor, "
+            "GSI2PK = :gsi_pk, "
+            "GSI2SK = :gsi_sk "
+            "REMOVE unassignedAt"
+        ),
+        ExpressionAttributeValues={
+            ":record_type":
+                "PROJECT_MEMBERSHIP",
+            ":project_id":
+                project_id,
+            ":user_id":
+                user_id,
+            ":project_role":
+                project_role,
+            ":active":
+                "ACTIVE",
+            ":now":
+                now,
+            ":actor":
+                actor_subject,
+            ":gsi_pk":
+                f"MEMBER#{user_id}",
+            ":gsi_sk":
+                (
+                    f"PROJECT#{project_id}"
+                    f"#ROLE#{project_role}"
+                ),
+        },
+        ReturnValues="ALL_NEW",
+    )
+
+    return (
+        response["Attributes"],
+        True,
+    )
+
+
+def _change_project_member_role(
+    project_id: str,
+    user_id: str,
+    project_role: str,
+    actor_subject: str,
+) -> dict[str, Any]:
+    now = _utcnow()
+
+    response = _ops_table().update_item(
+        Key={
+            "PK":
+                f"PROJECT#{project_id}",
+            "SK":
+                f"MEMBER#{user_id}",
+        },
+        UpdateExpression=(
+            "SET "
+            "projectRole = :role, "
+            "updatedAt = :now, "
+            "updatedBy = :actor, "
+            "GSI2SK = :gsi_sk"
+        ),
+        ConditionExpression=(
+            "attribute_exists(PK) "
+            "AND membershipStatus = :active"
+        ),
+        ExpressionAttributeValues={
+            ":role":
+                project_role,
+            ":now":
+                now,
+            ":actor":
+                actor_subject,
+            ":active":
+                "ACTIVE",
+            ":gsi_sk":
+                (
+                    f"PROJECT#{project_id}"
+                    f"#ROLE#{project_role}"
+                ),
+        },
+        ReturnValues="ALL_NEW",
+    )
+
+    return response["Attributes"]
+
+
+def _unassign_project_member(
+    project_id: str,
+    user_id: str,
+    actor_subject: str,
+) -> tuple[dict[str, Any] | None, bool]:
+    existing = _project_member_record(
+        project_id,
+        user_id,
+    )
+
+    if not existing:
+        return None, False
+
+    if (
+        existing.get(
+            "membershipStatus"
+        )
+        != "ACTIVE"
+    ):
+        return existing, False
+
+    now = _utcnow()
+
+    response = _ops_table().update_item(
+        Key={
+            "PK":
+                f"PROJECT#{project_id}",
+            "SK":
+                f"MEMBER#{user_id}",
+        },
+        UpdateExpression=(
+            "SET "
+            "membershipStatus = :status, "
+            "unassignedAt = :now, "
+            "updatedAt = :now, "
+            "updatedBy = :actor "
+            "REMOVE GSI2PK, GSI2SK"
+        ),
+        ExpressionAttributeValues={
+            ":status":
+                "UNASSIGNED",
+            ":now":
+                now,
+            ":actor":
+                actor_subject,
+        },
+        ReturnValues="ALL_NEW",
+    )
+
+    return (
+        response["Attributes"],
+        True,
     )
 
 
@@ -2207,6 +2561,449 @@ def _handle_get_project(
         },
     )
 
+def _handle_list_project_members(
+    event: dict[str, Any],
+):
+    parameters = (
+        event.get("pathParameters")
+        or {}
+    )
+
+    project_id = str(
+        parameters.get("projectId")
+        or ""
+    ).strip()
+
+    try:
+        project = _project_record(
+            project_id
+        )
+
+        if not project:
+            return _response(
+                404,
+                {
+                    "error":
+                        "project_not_found"
+                },
+            )
+
+        members = _list_project_members(
+            project_id
+        )
+
+    except (
+        BotoCoreError,
+        ClientError,
+        RuntimeError,
+    ):
+        LOGGER.exception(
+            "Failed to list project members"
+        )
+
+        return _response(
+            503,
+            {
+                "error":
+                    "temporarily_unavailable"
+            },
+        )
+
+    return _response(
+        200,
+        {
+            "items": members,
+            "count": len(members),
+        },
+    )
+
+
+def _handle_assign_project_member(
+    event: dict[str, Any],
+    actor_subject: str,
+):
+    parameters = (
+        event.get("pathParameters")
+        or {}
+    )
+
+    project_id = str(
+        parameters.get("projectId")
+        or ""
+    ).strip()
+
+    body = _request_body(event)
+
+    if body is None:
+        return _response(
+            400,
+            {"error": "invalid_json"},
+        )
+
+    user_id = str(
+        body.get("userId")
+        or ""
+    ).strip()
+
+    project_role = (
+        _normalize_project_role(
+            body.get("projectRole")
+        )
+    )
+
+    if not user_id:
+        return _response(
+            400,
+            {"error": "user_id_required"},
+        )
+
+    if not project_role:
+        return _response(
+            400,
+            {
+                "error":
+                    "invalid_project_role"
+            },
+        )
+
+    try:
+        project = _project_record(
+            project_id
+        )
+
+        if not project:
+            return _response(
+                404,
+                {
+                    "error":
+                        "project_not_found"
+                },
+            )
+
+        staff = _staff_record(
+            user_id
+        )
+
+        if not staff:
+            return _response(
+                404,
+                {
+                    "error":
+                        "staff_not_found"
+                },
+            )
+
+        if (
+            str(
+                staff.get("status")
+                or ""
+            ).upper()
+            != "ACTIVE"
+        ):
+            return _response(
+                409,
+                {
+                    "error":
+                        "staff_not_active"
+                },
+            )
+
+        membership, changed = (
+            _assign_project_member(
+                project_id,
+                user_id,
+                project_role,
+                actor_subject,
+            )
+        )
+
+    except (
+        BotoCoreError,
+        ClientError,
+        RuntimeError,
+    ):
+        LOGGER.exception(
+            "Project assignment failed"
+        )
+
+        return _response(
+            503,
+            {
+                "error":
+                    "temporarily_unavailable"
+            },
+        )
+
+    LOGGER.info(
+        "project_membership action=assign "
+        "actor=%s project=%s user=%s role=%s "
+        "changed=%s",
+        actor_subject,
+        project_id,
+        user_id,
+        project_role,
+        changed,
+    )
+
+    return _response(
+        201 if changed else 200,
+        {
+            "membership":
+                _public_project_member(
+                    membership,
+                    staff,
+                ),
+            "changed": changed,
+        },
+    )
+
+
+def _handle_project_member_role_change(
+    event: dict[str, Any],
+    actor_subject: str,
+):
+    parameters = (
+        event.get("pathParameters")
+        or {}
+    )
+
+    project_id = str(
+        parameters.get("projectId")
+        or ""
+    ).strip()
+
+    user_id = str(
+        parameters.get("userId")
+        or ""
+    ).strip()
+
+    body = _request_body(event)
+
+    if body is None:
+        return _response(
+            400,
+            {"error": "invalid_json"},
+        )
+
+    project_role = (
+        _normalize_project_role(
+            body.get("projectRole")
+        )
+    )
+
+    if not project_role:
+        return _response(
+            400,
+            {
+                "error":
+                    "invalid_project_role"
+            },
+        )
+
+    try:
+        project = _project_record(
+            project_id
+        )
+
+        if not project:
+            return _response(
+                404,
+                {
+                    "error":
+                        "project_not_found"
+                },
+            )
+
+        membership = (
+            _project_member_record(
+                project_id,
+                user_id,
+            )
+        )
+
+        if (
+            not membership
+            or membership.get(
+                "membershipStatus"
+            )
+            != "ACTIVE"
+        ):
+            return _response(
+                404,
+                {
+                    "error":
+                        "membership_not_found"
+                },
+            )
+
+        updated = (
+            _change_project_member_role(
+                project_id,
+                user_id,
+                project_role,
+                actor_subject,
+            )
+        )
+
+        staff = _staff_record(
+            user_id
+        )
+
+    except ClientError as exc:
+        if (
+            _aws_error_code(exc)
+            ==
+            "ConditionalCheckFailedException"
+        ):
+            return _response(
+                409,
+                {
+                    "error":
+                        "membership_not_active"
+                },
+            )
+
+        LOGGER.exception(
+            "Membership role update failed"
+        )
+
+        return _response(
+            503,
+            {
+                "error":
+                    "temporarily_unavailable"
+            },
+        )
+
+    except (
+        BotoCoreError,
+        RuntimeError,
+    ):
+        LOGGER.exception(
+            "Membership role update failed"
+        )
+
+        return _response(
+            503,
+            {
+                "error":
+                    "temporarily_unavailable"
+            },
+        )
+
+    return _response(
+        200,
+        {
+            "membership":
+                _public_project_member(
+                    updated,
+                    staff,
+                ),
+        },
+    )
+
+
+def _handle_unassign_project_member(
+    event: dict[str, Any],
+    actor_subject: str,
+):
+    parameters = (
+        event.get("pathParameters")
+        or {}
+    )
+
+    project_id = str(
+        parameters.get("projectId")
+        or ""
+    ).strip()
+
+    user_id = str(
+        parameters.get("userId")
+        or ""
+    ).strip()
+
+    try:
+        project = _project_record(
+            project_id
+        )
+
+        if not project:
+            return _response(
+                404,
+                {
+                    "error":
+                        "project_not_found"
+                },
+            )
+
+        membership, changed = (
+            _unassign_project_member(
+                project_id,
+                user_id,
+                actor_subject,
+            )
+        )
+
+    except (
+        BotoCoreError,
+        ClientError,
+        RuntimeError,
+    ):
+        LOGGER.exception(
+            "Project unassignment failed"
+        )
+
+        return _response(
+            503,
+            {
+                "error":
+                    "temporarily_unavailable"
+            },
+        )
+
+    if not membership:
+        return _response(
+            404,
+            {
+                "error":
+                    "membership_not_found"
+            },
+        )
+
+    LOGGER.info(
+        "project_membership action=unassign "
+        "actor=%s project=%s user=%s "
+        "changed=%s",
+        actor_subject,
+        project_id,
+        user_id,
+        changed,
+    )
+
+    return _response(
+        200,
+        {
+            "membership": {
+                "userId": user_id,
+                "projectId": project_id,
+                "projectRole": str(
+                    membership.get(
+                        "projectRole"
+                    )
+                    or ""
+                ),
+                "membershipStatus": str(
+                    membership.get(
+                        "membershipStatus"
+                    )
+                    or ""
+                ),
+            },
+            "changed": changed,
+        },
+    )
+
+
 def _handle_list_staff():
     try:
         staff = _list_staff_records()
@@ -2724,6 +3521,96 @@ def handler(
             )
 
         return _handle_list_projects()
+
+    if (
+        method == "GET"
+        and path.endswith("/members")
+        and "/v1/admin/projects/" in path
+    ):
+        if identity["role"] not in {
+            "OWNER",
+            "MANAGER",
+        }:
+            return _response(
+                403,
+                {
+                    "error":
+                        "manager_or_owner_required"
+                },
+            )
+
+        return _handle_list_project_members(
+            event
+        )
+
+    if (
+        method == "POST"
+        and path.endswith("/members")
+        and "/v1/admin/projects/" in path
+    ):
+        if identity["role"] not in {
+            "OWNER",
+            "MANAGER",
+        }:
+            return _response(
+                403,
+                {
+                    "error":
+                        "manager_or_owner_required"
+                },
+            )
+
+        return _handle_assign_project_member(
+            event,
+            identity["subject"],
+        )
+
+    if (
+        method == "PATCH"
+        and path.endswith("/role")
+        and "/members/" in path
+        and "/v1/admin/projects/" in path
+    ):
+        if identity["role"] not in {
+            "OWNER",
+            "MANAGER",
+        }:
+            return _response(
+                403,
+                {
+                    "error":
+                        "manager_or_owner_required"
+                },
+            )
+
+        return (
+            _handle_project_member_role_change(
+                event,
+                identity["subject"],
+            )
+        )
+
+    if (
+        method == "DELETE"
+        and "/members/" in path
+        and "/v1/admin/projects/" in path
+    ):
+        if identity["role"] not in {
+            "OWNER",
+            "MANAGER",
+        }:
+            return _response(
+                403,
+                {
+                    "error":
+                        "manager_or_owner_required"
+                },
+            )
+
+        return _handle_unassign_project_member(
+            event,
+            identity["subject"],
+        )
 
     if (
         method == "GET"

@@ -183,6 +183,7 @@ Resources:
           - GET
           - POST
           - PATCH
+          - DELETE
           - OPTIONS
         AllowHeaders:
           - authorization
@@ -473,6 +474,34 @@ Resources:
             ApiId: !Ref AdminApi
             Path: /v1/admin/projects/{projectId}
             Method: GET
+
+        ListProjectMembers:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref AdminApi
+            Path: /v1/admin/projects/{projectId}/members
+            Method: GET
+
+        AssignProjectMember:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref AdminApi
+            Path: /v1/admin/projects/{projectId}/members
+            Method: POST
+
+        ChangeProjectMemberRole:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref AdminApi
+            Path: /v1/admin/projects/{projectId}/members/{userId}/role
+            Method: PATCH
+
+        UnassignProjectMember:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref AdminApi
+            Path: /v1/admin/projects/{projectId}/members/{userId}
+            Method: DELETE
 
         ListStaff:
           Type: HttpApi
