@@ -503,6 +503,13 @@ Resources:
             Path: /v1/admin/projects/{projectId}/members/{userId}
             Method: DELETE
 
+        StaffDirectory:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref AdminApi
+            Path: /v1/admin/directory
+            Method: GET
+
         ListStaff:
           Type: HttpApi
           Properties:

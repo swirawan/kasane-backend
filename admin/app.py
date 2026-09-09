@@ -3004,6 +3004,77 @@ def _handle_unassign_project_member(
     )
 
 
+def _public_directory_member(
+    staff: dict[str, Any],
+) -> dict[str, Any]:
+    return {
+        "id": _staff_id(staff),
+        "displayName": str(
+            staff.get("displayName")
+            or ""
+        ),
+        "email": str(
+            staff.get("email")
+            or ""
+        ),
+        "organizationRole": str(
+            staff.get("organizationRole")
+            or ""
+        ),
+        "status": str(
+            staff.get("status")
+            or ""
+        ),
+    }
+
+
+def _handle_staff_directory():
+    try:
+        staff = _list_staff_records()
+
+    except (
+        BotoCoreError,
+        ClientError,
+        RuntimeError,
+    ):
+        LOGGER.exception(
+            "Failed to list staff directory"
+        )
+
+        return _response(
+            503,
+            {
+                "error":
+                    "temporarily_unavailable"
+            },
+        )
+
+    active = [
+        item
+        for item in staff
+        if (
+            str(
+                item.get("status")
+                or ""
+            ).upper()
+            == "ACTIVE"
+        )
+    ]
+
+    return _response(
+        200,
+        {
+            "items": [
+                _public_directory_member(
+                    item
+                )
+                for item in active
+            ],
+            "count": len(active),
+        },
+    )
+
+
 def _handle_list_staff():
     try:
         staff = _list_staff_records()
@@ -3631,6 +3702,26 @@ def handler(
         return _handle_get_project(
             event
         )
+
+    if (
+        method == "GET"
+        and path.endswith(
+            "/v1/admin/directory"
+        )
+    ):
+        if identity["role"] not in {
+            "OWNER",
+            "MANAGER",
+        }:
+            return _response(
+                403,
+                {
+                    "error":
+                        "manager_or_owner_required"
+                },
+            )
+
+        return _handle_staff_directory()
 
     if identity["role"] != "OWNER":
         return _response(
