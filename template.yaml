@@ -475,6 +475,34 @@ Resources:
             Path: /v1/admin/projects/{projectId}
             Method: GET
 
+        ListTasks:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref AdminApi
+            Path: /v1/admin/tasks
+            Method: GET
+
+        ListProjectTasks:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref AdminApi
+            Path: /v1/admin/projects/{projectId}/tasks
+            Method: GET
+
+        CreateProjectTask:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref AdminApi
+            Path: /v1/admin/projects/{projectId}/tasks
+            Method: POST
+
+        UpdateProjectTask:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref AdminApi
+            Path: /v1/admin/projects/{projectId}/tasks/{taskId}
+            Method: PATCH
+
         ListProjectMembers:
           Type: HttpApi
           Properties:

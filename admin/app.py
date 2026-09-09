@@ -59,6 +59,20 @@ PROJECT_ROLES = (
     "VENDOR_LIAISON",
 )
 
+TASK_STATUSES = (
+    "TODO",
+    "IN_PROGRESS",
+    "WAITING_BLOCKED",
+    "DONE",
+)
+
+TASK_PRIORITIES = (
+    "LOW",
+    "NORMAL",
+    "HIGH",
+    "URGENT",
+)
+
 
 class LeadConversionConflict(RuntimeError):
     pass
@@ -862,6 +876,470 @@ def _convert_lead(
     raise RuntimeError(
         "project_conversion_failed"
     )
+
+
+def _normalize_task_status(
+    value: Any,
+) -> str | None:
+    status = str(
+        value
+        or ""
+    ).strip().upper()
+
+    if status not in TASK_STATUSES:
+        return None
+
+    return status
+
+
+def _normalize_task_priority(
+    value: Any,
+) -> str | None:
+    priority = str(
+        value
+        or ""
+    ).strip().upper()
+
+    if priority not in TASK_PRIORITIES:
+        return None
+
+    return priority
+
+
+def _next_task_id(
+    project_id: str,
+) -> str:
+    response = _ops_table().update_item(
+        Key={
+            "PK":
+                f"PROJECT#{project_id}",
+            "SK":
+                "COUNTER#TASK",
+        },
+        UpdateExpression=(
+            "SET "
+            "recordType = if_not_exists("
+            "recordType, :record_type), "
+            "updatedAt = :updated "
+            "ADD nextValue :one"
+        ),
+        ExpressionAttributeValues={
+            ":record_type":
+                "TASK_COUNTER",
+            ":updated":
+                _utcnow(),
+            ":one":
+                1,
+        },
+        ReturnValues="ALL_NEW",
+    )
+
+    number = int(
+        response["Attributes"]["nextValue"]
+    )
+
+    return f"TASK-{number:03d}"
+
+
+def _task_due_sort(
+    due_date: str,
+) -> str:
+    return (
+        due_date
+        if due_date
+        else "9999-12-31"
+    )
+
+
+def _public_task(
+    item: dict[str, Any],
+) -> dict[str, Any]:
+    return {
+        "taskId": str(
+            item.get("taskId")
+            or ""
+        ),
+        "projectId": str(
+            item.get("projectId")
+            or ""
+        ),
+        "title": str(
+            item.get("title")
+            or ""
+        ),
+        "description": str(
+            item.get("description")
+            or ""
+        ),
+        "status": str(
+            item.get("status")
+            or ""
+        ),
+        "priority": str(
+            item.get("priority")
+            or ""
+        ),
+        "assigneeUserId": str(
+            item.get("assigneeUserId")
+            or ""
+        ),
+        "dueDate": str(
+            item.get("dueDate")
+            or ""
+        ),
+        "createdAt": str(
+            item.get("createdAt")
+            or ""
+        ),
+        "updatedAt": str(
+            item.get("updatedAt")
+            or ""
+        ),
+    }
+
+
+def _task_record(
+    project_id: str,
+    task_id: str,
+) -> dict[str, Any] | None:
+    response = _ops_table().get_item(
+        Key={
+            "PK":
+                f"PROJECT#{project_id}",
+            "SK":
+                f"TASK#{task_id}",
+        },
+        ConsistentRead=True,
+    )
+
+    item = response.get("Item")
+
+    if (
+        not isinstance(item, dict)
+        or item.get("recordType")
+            != "TASK"
+    ):
+        return None
+
+    return item
+
+
+def _list_project_tasks(
+    project_id: str,
+) -> list[dict[str, Any]]:
+    response = _ops_table().query(
+        KeyConditionExpression=(
+            "PK = :pk AND "
+            "begins_with(SK, :task)"
+        ),
+        ExpressionAttributeValues={
+            ":pk":
+                f"PROJECT#{project_id}",
+            ":task":
+                "TASK#",
+        },
+        ConsistentRead=True,
+    )
+
+    items = [
+        item
+        for item in (
+            response.get("Items")
+            or []
+        )
+        if (
+            isinstance(item, dict)
+            and item.get("recordType")
+                == "TASK"
+        )
+    ]
+
+    return sorted(
+        items,
+        key=lambda item: (
+            str(
+                item.get("status")
+                or ""
+            ),
+            _task_due_sort(
+                str(
+                    item.get("dueDate")
+                    or ""
+                )
+            ),
+            str(
+                item.get("taskId")
+                or ""
+            ),
+        ),
+    )
+
+
+def _list_all_tasks() -> list[dict[str, Any]]:
+    result: list[dict[str, Any]] = []
+
+    for status in TASK_STATUSES:
+        response = _ops_table().query(
+            IndexName="GSI3",
+            KeyConditionExpression=(
+                "GSI3PK = :pk"
+            ),
+            ExpressionAttributeValues={
+                ":pk":
+                    f"QUEUE#TASK#{status}",
+            },
+            ScanIndexForward=True,
+        )
+
+        for item in (
+            response.get("Items")
+            or []
+        ):
+            if (
+                isinstance(item, dict)
+                and item.get("recordType")
+                    == "TASK"
+            ):
+                result.append(item)
+
+    return result
+
+
+def _create_project_task(
+    project_id: str,
+    *,
+    title: str,
+    description: str,
+    status: str,
+    priority: str,
+    assignee_user_id: str,
+    due_date: str,
+    actor_subject: str,
+) -> dict[str, Any]:
+    task_id = _next_task_id(
+        project_id
+    )
+
+    now = _utcnow()
+
+    task = {
+        "PK":
+            f"PROJECT#{project_id}",
+        "SK":
+            f"TASK#{task_id}",
+        "recordType":
+            "TASK",
+        "taskId":
+            task_id,
+        "projectId":
+            project_id,
+        "title":
+            title,
+        "description":
+            description,
+        "status":
+            status,
+        "priority":
+            priority,
+        "assigneeUserId":
+            assignee_user_id,
+        "dueDate":
+            due_date,
+        "createdAt":
+            now,
+        "createdBy":
+            actor_subject,
+        "updatedAt":
+            now,
+        "updatedBy":
+            actor_subject,
+        "GSI3PK":
+            f"QUEUE#TASK#{status}",
+        "GSI3SK": (
+            f"DUE#{_task_due_sort(due_date)}"
+            f"#PROJECT#{project_id}"
+            f"#TASK#{task_id}"
+        ),
+    }
+
+    if assignee_user_id:
+        task["GSI1PK"] = (
+            f"ASSIGNEE#{assignee_user_id}"
+        )
+
+        task["GSI1SK"] = (
+            f"DUE#{_task_due_sort(due_date)}"
+            f"#STATUS#{status}"
+            f"#PROJECT#{project_id}"
+            f"#TASK#{task_id}"
+        )
+
+    _ops_table().put_item(
+        Item=task,
+        ConditionExpression=(
+            "attribute_not_exists(PK)"
+        ),
+    )
+
+    return task
+
+
+def _update_project_task(
+    task: dict[str, Any],
+    *,
+    title: str | None,
+    description: str | None,
+    status: str | None,
+    priority: str | None,
+    assignee_user_id: str | None,
+    due_date: str | None,
+    actor_subject: str,
+) -> dict[str, Any]:
+    next_title = (
+        title
+        if title is not None
+        else str(
+            task.get("title")
+            or ""
+        )
+    )
+
+    next_description = (
+        description
+        if description is not None
+        else str(
+            task.get("description")
+            or ""
+        )
+    )
+
+    next_status = (
+        status
+        if status is not None
+        else str(
+            task.get("status")
+            or "TODO"
+        )
+    )
+
+    next_priority = (
+        priority
+        if priority is not None
+        else str(
+            task.get("priority")
+            or "NORMAL"
+        )
+    )
+
+    next_assignee = (
+        assignee_user_id
+        if assignee_user_id is not None
+        else str(
+            task.get("assigneeUserId")
+            or ""
+        )
+    )
+
+    next_due_date = (
+        due_date
+        if due_date is not None
+        else str(
+            task.get("dueDate")
+            or ""
+        )
+    )
+
+    now = _utcnow()
+
+    names = {
+        "#status": "status",
+    }
+
+    values: dict[str, Any] = {
+        ":title":
+            next_title,
+        ":description":
+            next_description,
+        ":status":
+            next_status,
+        ":priority":
+            next_priority,
+        ":assignee":
+            next_assignee,
+        ":due_date":
+            next_due_date,
+        ":updated":
+            now,
+        ":actor":
+            actor_subject,
+        ":task_type":
+            "TASK",
+        ":gsi3pk":
+            f"QUEUE#TASK#{next_status}",
+        ":gsi3sk": (
+            f"DUE#{_task_due_sort(next_due_date)}"
+            f"#PROJECT#{task['projectId']}"
+            f"#TASK#{task['taskId']}"
+        ),
+    }
+
+    update_expression = (
+        "SET "
+        "title = :title, "
+        "description = :description, "
+        "#status = :status, "
+        "priority = :priority, "
+        "assigneeUserId = :assignee, "
+        "dueDate = :due_date, "
+        "updatedAt = :updated, "
+        "updatedBy = :actor, "
+        "GSI3PK = :gsi3pk, "
+        "GSI3SK = :gsi3sk"
+    )
+
+    if next_assignee:
+        values[":gsi1pk"] = (
+            f"ASSIGNEE#{next_assignee}"
+        )
+
+        values[":gsi1sk"] = (
+            f"DUE#{_task_due_sort(next_due_date)}"
+            f"#STATUS#{next_status}"
+            f"#PROJECT#{task['projectId']}"
+            f"#TASK#{task['taskId']}"
+        )
+
+        update_expression += (
+            ", GSI1PK = :gsi1pk, "
+            "GSI1SK = :gsi1sk"
+        )
+
+    else:
+        update_expression += (
+            " REMOVE GSI1PK, GSI1SK"
+        )
+
+    response = _ops_table().update_item(
+        Key={
+            "PK":
+                task["PK"],
+            "SK":
+                task["SK"],
+        },
+        UpdateExpression=
+            update_expression,
+        ExpressionAttributeNames=
+            names,
+        ExpressionAttributeValues=
+            values,
+        ConditionExpression=(
+            "attribute_exists(PK) "
+            "AND recordType = :task_type"
+        ),
+        ReturnValues="ALL_NEW",
+    )
+
+    return response["Attributes"]
 
 
 def _normalize_project_role(
@@ -2561,6 +3039,499 @@ def _handle_get_project(
         },
     )
 
+def _handle_list_tasks():
+    try:
+        tasks = _list_all_tasks()
+
+    except (
+        BotoCoreError,
+        ClientError,
+        RuntimeError,
+    ):
+        LOGGER.exception(
+            "Failed to list tasks"
+        )
+
+        return _response(
+            503,
+            {
+                "error":
+                    "temporarily_unavailable"
+            },
+        )
+
+    return _response(
+        200,
+        {
+            "items": [
+                _public_task(task)
+                for task in tasks
+            ],
+            "count": len(tasks),
+        },
+    )
+
+
+def _handle_list_project_tasks(
+    event: dict[str, Any],
+):
+    parameters = (
+        event.get("pathParameters")
+        or {}
+    )
+
+    project_id = str(
+        parameters.get("projectId")
+        or ""
+    ).strip()
+
+    try:
+        project = _project_record(
+            project_id
+        )
+
+        if not project:
+            return _response(
+                404,
+                {
+                    "error":
+                        "project_not_found"
+                },
+            )
+
+        tasks = _list_project_tasks(
+            project_id
+        )
+
+    except (
+        BotoCoreError,
+        ClientError,
+        RuntimeError,
+    ):
+        LOGGER.exception(
+            "Failed to list project tasks"
+        )
+
+        return _response(
+            503,
+            {
+                "error":
+                    "temporarily_unavailable"
+            },
+        )
+
+    return _response(
+        200,
+        {
+            "items": [
+                _public_task(task)
+                for task in tasks
+            ],
+            "count": len(tasks),
+        },
+    )
+
+
+def _handle_create_project_task(
+    event: dict[str, Any],
+    actor_subject: str,
+):
+    parameters = (
+        event.get("pathParameters")
+        or {}
+    )
+
+    project_id = str(
+        parameters.get("projectId")
+        or ""
+    ).strip()
+
+    body = _request_body(event)
+
+    if body is None:
+        return _response(
+            400,
+            {"error": "invalid_json"},
+        )
+
+    title = str(
+        body.get("title")
+        or ""
+    ).strip()
+
+    description = str(
+        body.get("description")
+        or ""
+    ).strip()
+
+    status = (
+        _normalize_task_status(
+            body.get("status")
+            or "TODO"
+        )
+    )
+
+    priority = (
+        _normalize_task_priority(
+            body.get("priority")
+            or "NORMAL"
+        )
+    )
+
+    assignee_user_id = str(
+        body.get("assigneeUserId")
+        or ""
+    ).strip()
+
+    due_date = str(
+        body.get("dueDate")
+        or ""
+    ).strip()
+
+    if not title:
+        return _response(
+            400,
+            {
+                "error":
+                    "task_title_required"
+            },
+        )
+
+    if len(title) > 180:
+        return _response(
+            400,
+            {
+                "error":
+                    "task_title_too_long"
+            },
+        )
+
+    if not status:
+        return _response(
+            400,
+            {
+                "error":
+                    "invalid_task_status"
+            },
+        )
+
+    if not priority:
+        return _response(
+            400,
+            {
+                "error":
+                    "invalid_task_priority"
+            },
+        )
+
+    try:
+        project = _project_record(
+            project_id
+        )
+
+        if not project:
+            return _response(
+                404,
+                {
+                    "error":
+                        "project_not_found"
+                },
+            )
+
+        if assignee_user_id:
+            membership = (
+                _project_member_record(
+                    project_id,
+                    assignee_user_id,
+                )
+            )
+
+            if (
+                not membership
+                or membership.get(
+                    "membershipStatus"
+                )
+                != "ACTIVE"
+            ):
+                return _response(
+                    409,
+                    {
+                        "error":
+                            "assignee_not_project_member"
+                    },
+                )
+
+        task = _create_project_task(
+            project_id,
+            title=title,
+            description=description,
+            status=status,
+            priority=priority,
+            assignee_user_id=
+                assignee_user_id,
+            due_date=due_date,
+            actor_subject=
+                actor_subject,
+        )
+
+    except (
+        BotoCoreError,
+        ClientError,
+        RuntimeError,
+    ):
+        LOGGER.exception(
+            "Task creation failed"
+        )
+
+        return _response(
+            503,
+            {
+                "error":
+                    "temporarily_unavailable"
+            },
+        )
+
+    LOGGER.info(
+        "task action=create "
+        "actor=%s project=%s task=%s",
+        actor_subject,
+        project_id,
+        task.get("taskId"),
+    )
+
+    return _response(
+        201,
+        {
+            "task":
+                _public_task(task),
+        },
+    )
+
+
+def _handle_update_project_task(
+    event: dict[str, Any],
+    actor_subject: str,
+):
+    parameters = (
+        event.get("pathParameters")
+        or {}
+    )
+
+    project_id = str(
+        parameters.get("projectId")
+        or ""
+    ).strip()
+
+    task_id = str(
+        parameters.get("taskId")
+        or ""
+    ).strip()
+
+    body = _request_body(event)
+
+    if body is None:
+        return _response(
+            400,
+            {"error": "invalid_json"},
+        )
+
+    title = (
+        str(body["title"]).strip()
+        if "title" in body
+        else None
+    )
+
+    description = (
+        str(
+            body["description"]
+            or ""
+        ).strip()
+        if "description" in body
+        else None
+    )
+
+    status = None
+
+    if "status" in body:
+        status = (
+            _normalize_task_status(
+                body.get("status")
+            )
+        )
+
+        if not status:
+            return _response(
+                400,
+                {
+                    "error":
+                        "invalid_task_status"
+                },
+            )
+
+    priority = None
+
+    if "priority" in body:
+        priority = (
+            _normalize_task_priority(
+                body.get("priority")
+            )
+        )
+
+        if not priority:
+            return _response(
+                400,
+                {
+                    "error":
+                        "invalid_task_priority"
+                },
+            )
+
+    assignee_user_id = (
+        str(
+            body.get(
+                "assigneeUserId"
+            )
+            or ""
+        ).strip()
+        if "assigneeUserId" in body
+        else None
+    )
+
+    due_date = (
+        str(
+            body.get("dueDate")
+            or ""
+        ).strip()
+        if "dueDate" in body
+        else None
+    )
+
+    if title is not None:
+        if not title:
+            return _response(
+                400,
+                {
+                    "error":
+                        "task_title_required"
+                },
+            )
+
+        if len(title) > 180:
+            return _response(
+                400,
+                {
+                    "error":
+                        "task_title_too_long"
+                },
+            )
+
+    try:
+        task = _task_record(
+            project_id,
+            task_id,
+        )
+
+        if not task:
+            return _response(
+                404,
+                {
+                    "error":
+                        "task_not_found"
+                },
+            )
+
+        if (
+            assignee_user_id is not None
+            and assignee_user_id
+        ):
+            membership = (
+                _project_member_record(
+                    project_id,
+                    assignee_user_id,
+                )
+            )
+
+            if (
+                not membership
+                or membership.get(
+                    "membershipStatus"
+                )
+                != "ACTIVE"
+            ):
+                return _response(
+                    409,
+                    {
+                        "error":
+                            "assignee_not_project_member"
+                    },
+                )
+
+        updated = (
+            _update_project_task(
+                task,
+                title=title,
+                description=description,
+                status=status,
+                priority=priority,
+                assignee_user_id=
+                    assignee_user_id,
+                due_date=due_date,
+                actor_subject=
+                    actor_subject,
+            )
+        )
+
+    except ClientError as exc:
+        if (
+            _aws_error_code(exc)
+            ==
+            "ConditionalCheckFailedException"
+        ):
+            return _response(
+                409,
+                {
+                    "error":
+                        "task_update_conflict"
+                },
+            )
+
+        LOGGER.exception(
+            "Task update failed"
+        )
+
+        return _response(
+            503,
+            {
+                "error":
+                    "temporarily_unavailable"
+            },
+        )
+
+    except (
+        BotoCoreError,
+        RuntimeError,
+    ):
+        LOGGER.exception(
+            "Task update failed"
+        )
+
+        return _response(
+            503,
+            {
+                "error":
+                    "temporarily_unavailable"
+            },
+        )
+
+    return _response(
+        200,
+        {
+            "task":
+                _public_task(updated),
+        },
+    )
+
+
 def _handle_list_project_members(
     event: dict[str, Any],
 ):
@@ -3592,6 +4563,91 @@ def handler(
             )
 
         return _handle_list_projects()
+
+    if (
+        method == "GET"
+        and path.endswith(
+            "/v1/admin/tasks"
+        )
+    ):
+        if identity["role"] not in {
+            "OWNER",
+            "MANAGER",
+        }:
+            return _response(
+                403,
+                {
+                    "error":
+                        "manager_or_owner_required"
+                },
+            )
+
+        return _handle_list_tasks()
+
+    if (
+        method == "GET"
+        and path.endswith("/tasks")
+        and "/v1/admin/projects/" in path
+    ):
+        if identity["role"] not in {
+            "OWNER",
+            "MANAGER",
+        }:
+            return _response(
+                403,
+                {
+                    "error":
+                        "manager_or_owner_required"
+                },
+            )
+
+        return _handle_list_project_tasks(
+            event
+        )
+
+    if (
+        method == "POST"
+        and path.endswith("/tasks")
+        and "/v1/admin/projects/" in path
+    ):
+        if identity["role"] not in {
+            "OWNER",
+            "MANAGER",
+        }:
+            return _response(
+                403,
+                {
+                    "error":
+                        "manager_or_owner_required"
+                },
+            )
+
+        return _handle_create_project_task(
+            event,
+            identity["subject"],
+        )
+
+    if (
+        method == "PATCH"
+        and "/tasks/" in path
+        and "/v1/admin/projects/" in path
+    ):
+        if identity["role"] not in {
+            "OWNER",
+            "MANAGER",
+        }:
+            return _response(
+                403,
+                {
+                    "error":
+                        "manager_or_owner_required"
+                },
+            )
+
+        return _handle_update_project_task(
+            event,
+            identity["subject"],
+        )
 
     if (
         method == "GET"
