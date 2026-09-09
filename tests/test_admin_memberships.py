@@ -414,6 +414,9 @@ def test_unassign_preserves_history_index():
         admin_app,
         "_ops_table",
         return_value=table,
+    ), patch.object(
+        admin_app,
+        "_refresh_project_assignment_summary",
     ):
         result, changed = (
             admin_app

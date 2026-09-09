@@ -594,6 +594,20 @@ def _public_project(
         ),
         "projectColor":
             _project_color(item),
+        "activeMemberCount": int(
+            item.get("activeMemberCount")
+            or 0
+        ),
+        "projectLeadUserIds": [
+            str(user_id)
+            for user_id in (
+                item.get(
+                    "projectLeadUserIds"
+                )
+                or []
+            )
+            if str(user_id).strip()
+        ],
         "leadReference": str(
             item.get("leadReference")
             or ""
@@ -3624,6 +3638,126 @@ def _list_project_members(
     )
 
 
+def _project_assignment_summary(
+    project_id: str,
+) -> dict[str, Any]:
+    response = _ops_table().query(
+        KeyConditionExpression=(
+            "PK = :pk AND "
+            "begins_with(SK, :member)"
+        ),
+        ExpressionAttributeValues={
+            ":pk":
+                f"PROJECT#{project_id}",
+            ":member":
+                "MEMBER#",
+        },
+        ConsistentRead=True,
+    )
+
+    active_member_count = 0
+    project_lead_user_ids = []
+
+    for membership in (
+        response.get("Items")
+        or []
+    ):
+        if (
+            not isinstance(
+                membership,
+                dict,
+            )
+            or membership.get(
+                "recordType"
+            )
+            != "PROJECT_MEMBERSHIP"
+            or membership.get(
+                "membershipStatus"
+            )
+            != "ACTIVE"
+        ):
+            continue
+
+        user_id = str(
+            membership.get("userId")
+            or ""
+        ).strip()
+
+        if not user_id:
+            continue
+
+        active_member_count += 1
+
+        if (
+            membership.get(
+                "projectRole"
+            )
+            == "PROJECT_LEAD"
+        ):
+            project_lead_user_ids.append(
+                user_id
+            )
+
+    return {
+        "activeMemberCount":
+            active_member_count,
+        "projectLeadUserIds":
+            sorted(
+                set(
+                    project_lead_user_ids
+                )
+            ),
+    }
+
+
+def _refresh_project_assignment_summary(
+    project_id: str,
+):
+    summary = (
+        _project_assignment_summary(
+            project_id
+        )
+    )
+
+    _ops_table().update_item(
+        Key={
+            "PK":
+                f"PROJECT#{project_id}",
+            "SK":
+                "META",
+        },
+        UpdateExpression=(
+            "SET "
+            "activeMemberCount = "
+            ":member_count, "
+            "projectLeadUserIds = "
+            ":lead_ids, "
+            "assignmentSummaryUpdatedAt = "
+            ":now"
+        ),
+        ConditionExpression=(
+            "attribute_exists(PK) "
+            "AND recordType = :project_type"
+        ),
+        ExpressionAttributeValues={
+            ":member_count":
+                summary[
+                    "activeMemberCount"
+                ],
+            ":lead_ids":
+                summary[
+                    "projectLeadUserIds"
+                ],
+            ":now":
+                _utcnow(),
+            ":project_type":
+                "PROJECT",
+        },
+    )
+
+    return summary
+
+
 def _assign_project_member(
     project_id: str,
     user_id: str,
@@ -3701,6 +3835,10 @@ def _assign_project_member(
         ReturnValues="ALL_NEW",
     )
 
+    _refresh_project_assignment_summary(
+        project_id
+    )
+
     return (
         response["Attributes"],
         True,
@@ -3749,6 +3887,10 @@ def _change_project_member_role(
                 ),
         },
         ReturnValues="ALL_NEW",
+    )
+
+    _refresh_project_assignment_summary(
+        project_id
     )
 
     return response["Attributes"]
@@ -3800,6 +3942,10 @@ def _unassign_project_member(
                 actor_subject,
         },
         ReturnValues="ALL_NEW",
+    )
+
+    _refresh_project_assignment_summary(
+        project_id
     )
 
     return (
