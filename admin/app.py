@@ -6,6 +6,7 @@ import logging
 import os
 from datetime import datetime, timezone
 from typing import Any
+from uuid import uuid4
 
 import boto3
 from boto3.dynamodb.types import TypeSerializer
@@ -71,6 +72,22 @@ TASK_PRIORITIES = (
     "NORMAL",
     "HIGH",
     "URGENT",
+)
+
+NOTE_CATEGORIES = (
+    "GENERAL",
+    "CUSTOMER_CONTACT",
+    "VENDOR",
+    "VENUE",
+    "PRICING",
+    "INTERNAL",
+    "DECISION",
+)
+
+FOLLOW_UP_STATUSES = (
+    "OPEN",
+    "DONE",
+    "CANCELED",
 )
 
 
@@ -876,6 +893,872 @@ def _convert_lead(
     raise RuntimeError(
         "project_conversion_failed"
     )
+
+
+def _new_record_id(
+    prefix: str,
+) -> str:
+    return (
+        f"{prefix}-"
+        f"{uuid4().hex[:12].upper()}"
+    )
+
+
+def _normalize_note_category(
+    value: Any,
+) -> str | None:
+    category = str(
+        value
+        or ""
+    ).strip().upper()
+
+    if category not in NOTE_CATEGORIES:
+        return None
+
+    return category
+
+
+def _normalize_follow_up_status(
+    value: Any,
+) -> str | None:
+    status = str(
+        value
+        or ""
+    ).strip().upper()
+
+    if status not in FOLLOW_UP_STATUSES:
+        return None
+
+    return status
+
+
+def _normalize_due_at(
+    value: Any,
+) -> str | None:
+    raw = str(
+        value
+        or ""
+    ).strip()
+
+    if not raw:
+        return None
+
+    candidate = (
+        raw[:-1] + "+00:00"
+        if raw.endswith("Z")
+        else raw
+    )
+
+    try:
+        parsed = datetime.fromisoformat(
+            candidate
+        )
+    except ValueError:
+        return None
+
+    if parsed.tzinfo is None:
+        return None
+
+    return (
+        parsed
+        .astimezone(timezone.utc)
+        .isoformat()
+        .replace("+00:00", "Z")
+    )
+
+
+def _public_note(
+    item: dict[str, Any],
+) -> dict[str, Any]:
+    return {
+        "noteId": str(
+            item.get("noteId")
+            or ""
+        ),
+        "projectId": str(
+            item.get("projectId")
+            or ""
+        ),
+        "category": str(
+            item.get("category")
+            or ""
+        ),
+        "body": str(
+            item.get("body")
+            or ""
+        ),
+        "createdAt": str(
+            item.get("createdAt")
+            or ""
+        ),
+        "createdBy": str(
+            item.get("createdBy")
+            or ""
+        ),
+        "updatedAt": str(
+            item.get("updatedAt")
+            or ""
+        ),
+        "updatedBy": str(
+            item.get("updatedBy")
+            or ""
+        ),
+    }
+
+
+def _public_follow_up(
+    item: dict[str, Any],
+) -> dict[str, Any]:
+    return {
+        "followUpId": str(
+            item.get("followUpId")
+            or ""
+        ),
+        "projectId": str(
+            item.get("projectId")
+            or ""
+        ),
+        "title": str(
+            item.get("title")
+            or ""
+        ),
+        "details": str(
+            item.get("details")
+            or ""
+        ),
+        "status": str(
+            item.get("status")
+            or ""
+        ),
+        "assigneeUserId": str(
+            item.get("assigneeUserId")
+            or ""
+        ),
+        "dueAt": str(
+            item.get("dueAt")
+            or ""
+        ),
+        "createdAt": str(
+            item.get("createdAt")
+            or ""
+        ),
+        "updatedAt": str(
+            item.get("updatedAt")
+            or ""
+        ),
+        "completedAt": str(
+            item.get("completedAt")
+            or ""
+        ),
+        "closedAt": str(
+            item.get("closedAt")
+            or ""
+        ),
+    }
+
+
+def _public_activity(
+    item: dict[str, Any],
+) -> dict[str, Any]:
+    metadata = item.get("metadata")
+
+    if not isinstance(metadata, dict):
+        metadata = {}
+
+    return {
+        "activityId": str(
+            item.get("activityId")
+            or ""
+        ),
+        "projectId": str(
+            item.get("projectId")
+            or ""
+        ),
+        "activityType": str(
+            item.get("activityType")
+            or ""
+        ),
+        "summary": str(
+            item.get("summary")
+            or ""
+        ),
+        "actorUserId": str(
+            item.get("actorUserId")
+            or ""
+        ),
+        "createdAt": str(
+            item.get("createdAt")
+            or ""
+        ),
+        "metadata": metadata,
+    }
+
+
+def _project_child_record(
+    project_id: str,
+    sk: str,
+    record_type: str,
+) -> dict[str, Any] | None:
+    response = _ops_table().get_item(
+        Key={
+            "PK":
+                f"PROJECT#{project_id}",
+            "SK":
+                sk,
+        },
+        ConsistentRead=True,
+    )
+
+    item = response.get("Item")
+
+    if (
+        not isinstance(item, dict)
+        or item.get("recordType")
+            != record_type
+    ):
+        return None
+
+    return item
+
+
+def _list_project_children(
+    project_id: str,
+    prefix: str,
+    record_type: str,
+) -> list[dict[str, Any]]:
+    response = _ops_table().query(
+        KeyConditionExpression=(
+            "PK = :pk AND "
+            "begins_with(SK, :prefix)"
+        ),
+        ExpressionAttributeValues={
+            ":pk":
+                f"PROJECT#{project_id}",
+            ":prefix":
+                prefix,
+        },
+        ConsistentRead=True,
+    )
+
+    return [
+        item
+        for item in (
+            response.get("Items")
+            or []
+        )
+        if (
+            isinstance(item, dict)
+            and item.get("recordType")
+                == record_type
+        )
+    ]
+
+
+def _append_activity(
+    project_id: str,
+    actor_subject: str,
+    activity_type: str,
+    summary: str,
+    metadata: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    now = _utcnow()
+
+    activity_id = _new_record_id(
+        "ACT"
+    )
+
+    item = {
+        "PK":
+            f"PROJECT#{project_id}",
+        "SK":
+            (
+                f"ACTIVITY#{now}"
+                f"#{activity_id}"
+            ),
+        "recordType":
+            "ACTIVITY",
+        "activityId":
+            activity_id,
+        "projectId":
+            project_id,
+        "activityType":
+            activity_type,
+        "summary":
+            summary,
+        "actorUserId":
+            actor_subject,
+        "metadata":
+            metadata or {},
+        "createdAt":
+            now,
+    }
+
+    _ops_table().put_item(
+        Item=item,
+        ConditionExpression=(
+            "attribute_not_exists(PK) "
+            "AND attribute_not_exists(SK)"
+        ),
+    )
+
+    return item
+
+
+def _record_activity(
+    project_id: str,
+    actor_subject: str,
+    activity_type: str,
+    summary: str,
+    metadata: dict[str, Any] | None = None,
+) -> None:
+    try:
+        _append_activity(
+            project_id,
+            actor_subject,
+            activity_type,
+            summary,
+            metadata,
+        )
+
+    except (
+        BotoCoreError,
+        ClientError,
+        RuntimeError,
+    ):
+        LOGGER.exception(
+            "Operational activity write failed "
+            "project=%s type=%s",
+            project_id,
+            activity_type,
+        )
+
+
+def _list_project_activity(
+    project_id: str,
+) -> list[dict[str, Any]]:
+    response = _ops_table().query(
+        KeyConditionExpression=(
+            "PK = :pk AND "
+            "begins_with(SK, :prefix)"
+        ),
+        ExpressionAttributeValues={
+            ":pk":
+                f"PROJECT#{project_id}",
+            ":prefix":
+                "ACTIVITY#",
+        },
+        ConsistentRead=True,
+        ScanIndexForward=False,
+        Limit=100,
+    )
+
+    return [
+        item
+        for item in (
+            response.get("Items")
+            or []
+        )
+        if (
+            isinstance(item, dict)
+            and item.get("recordType")
+                == "ACTIVITY"
+        )
+    ]
+
+
+def _create_project_note(
+    project_id: str,
+    *,
+    category: str,
+    body: str,
+    actor_subject: str,
+) -> dict[str, Any]:
+    note_id = _new_record_id(
+        "NTE"
+    )
+
+    now = _utcnow()
+
+    item = {
+        "PK":
+            f"PROJECT#{project_id}",
+        "SK":
+            f"NOTE#{note_id}",
+        "recordType":
+            "NOTE",
+        "noteId":
+            note_id,
+        "projectId":
+            project_id,
+        "category":
+            category,
+        "body":
+            body,
+        "createdAt":
+            now,
+        "createdBy":
+            actor_subject,
+        "updatedAt":
+            now,
+        "updatedBy":
+            actor_subject,
+    }
+
+    _ops_table().put_item(
+        Item=item,
+        ConditionExpression=(
+            "attribute_not_exists(PK) "
+            "AND attribute_not_exists(SK)"
+        ),
+    )
+
+    _record_activity(
+        project_id,
+        actor_subject,
+        "NOTE_ADDED",
+        f"Added {category.lower()} note",
+        {
+            "noteId":
+                note_id,
+            "category":
+                category,
+        },
+    )
+
+    return item
+
+
+def _update_project_note(
+    current: dict[str, Any],
+    *,
+    category: str,
+    body: str,
+    actor_subject: str,
+) -> dict[str, Any]:
+    now = _utcnow()
+
+    response = _ops_table().update_item(
+        Key={
+            "PK":
+                current["PK"],
+            "SK":
+                current["SK"],
+        },
+        UpdateExpression=(
+            "SET "
+            "category = :category, "
+            "body = :body, "
+            "updatedAt = :updated, "
+            "updatedBy = :actor"
+        ),
+        ExpressionAttributeValues={
+            ":category":
+                category,
+            ":body":
+                body,
+            ":updated":
+                now,
+            ":actor":
+                actor_subject,
+            ":note_type":
+                "NOTE",
+        },
+        ConditionExpression=(
+            "attribute_exists(PK) "
+            "AND recordType = :note_type"
+        ),
+        ReturnValues="ALL_NEW",
+    )
+
+    updated = response["Attributes"]
+
+    _record_activity(
+        str(
+            updated.get("projectId")
+            or ""
+        ),
+        actor_subject,
+        "NOTE_UPDATED",
+        "Updated project note",
+        {
+            "noteId":
+                str(
+                    updated.get("noteId")
+                    or ""
+                ),
+            "category":
+                category,
+        },
+    )
+
+    return updated
+
+
+def _create_project_follow_up(
+    project_id: str,
+    *,
+    title: str,
+    details: str,
+    assignee_user_id: str,
+    due_at: str,
+    actor_subject: str,
+) -> dict[str, Any]:
+    follow_up_id = _new_record_id(
+        "FUP"
+    )
+
+    now = _utcnow()
+
+    item: dict[str, Any] = {
+        "PK":
+            f"PROJECT#{project_id}",
+        "SK":
+            f"FOLLOWUP#{follow_up_id}",
+        "recordType":
+            "FOLLOW_UP",
+        "followUpId":
+            follow_up_id,
+        "projectId":
+            project_id,
+        "title":
+            title,
+        "details":
+            details,
+        "status":
+            "OPEN",
+        "assigneeUserId":
+            assignee_user_id,
+        "dueAt":
+            due_at,
+        "createdAt":
+            now,
+        "createdBy":
+            actor_subject,
+        "updatedAt":
+            now,
+        "updatedBy":
+            actor_subject,
+        "GSI3PK":
+            "QUEUE#FOLLOWUP#OPEN",
+        "GSI3SK": (
+            f"DUE#{due_at}"
+            f"#PROJECT#{project_id}"
+            f"#FOLLOWUP#{follow_up_id}"
+        ),
+    }
+
+    if assignee_user_id:
+        item["GSI1PK"] = (
+            f"ASSIGNEE#{assignee_user_id}"
+        )
+
+        item["GSI1SK"] = (
+            f"DUE#{due_at}"
+            f"#TYPE#FOLLOWUP"
+            f"#PROJECT#{project_id}"
+            f"#FOLLOWUP#{follow_up_id}"
+        )
+
+    _ops_table().put_item(
+        Item=item,
+        ConditionExpression=(
+            "attribute_not_exists(PK) "
+            "AND attribute_not_exists(SK)"
+        ),
+    )
+
+    _record_activity(
+        project_id,
+        actor_subject,
+        "FOLLOWUP_CREATED",
+        f"Created follow-up: {title}",
+        {
+            "followUpId":
+                follow_up_id,
+            "dueAt":
+                due_at,
+            "assigneeUserId":
+                assignee_user_id,
+        },
+    )
+
+    return item
+
+
+def _update_project_follow_up(
+    current: dict[str, Any],
+    *,
+    title: str,
+    details: str,
+    status: str,
+    assignee_user_id: str,
+    due_at: str,
+    actor_subject: str,
+) -> dict[str, Any]:
+    now = _utcnow()
+
+    previous_status = str(
+        current.get("status")
+        or "OPEN"
+    )
+
+    names = {
+        "#status":
+            "status",
+    }
+
+    values: dict[str, Any] = {
+        ":title":
+            title,
+        ":details":
+            details,
+        ":status":
+            status,
+        ":assignee":
+            assignee_user_id,
+        ":due_at":
+            due_at,
+        ":updated":
+            now,
+        ":actor":
+            actor_subject,
+        ":follow_up_type":
+            "FOLLOW_UP",
+    }
+
+    set_parts = [
+        "title = :title",
+        "details = :details",
+        "#status = :status",
+        "assigneeUserId = :assignee",
+        "dueAt = :due_at",
+        "updatedAt = :updated",
+        "updatedBy = :actor",
+    ]
+
+    remove_parts: list[str] = []
+
+    if status == "OPEN":
+        values[":gsi3pk"] = (
+            "QUEUE#FOLLOWUP#OPEN"
+        )
+
+        values[":gsi3sk"] = (
+            f"DUE#{due_at}"
+            f"#PROJECT#{current['projectId']}"
+            f"#FOLLOWUP#{current['followUpId']}"
+        )
+
+        set_parts.extend([
+            "GSI3PK = :gsi3pk",
+            "GSI3SK = :gsi3sk",
+        ])
+
+        if assignee_user_id:
+            values[":gsi1pk"] = (
+                f"ASSIGNEE#{assignee_user_id}"
+            )
+
+            values[":gsi1sk"] = (
+                f"DUE#{due_at}"
+                f"#TYPE#FOLLOWUP"
+                f"#PROJECT#{current['projectId']}"
+                f"#FOLLOWUP#{current['followUpId']}"
+            )
+
+            set_parts.extend([
+                "GSI1PK = :gsi1pk",
+                "GSI1SK = :gsi1sk",
+            ])
+
+        else:
+            remove_parts.extend([
+                "GSI1PK",
+                "GSI1SK",
+            ])
+
+        remove_parts.extend([
+            "closedAt",
+            "closedBy",
+            "completedAt",
+        ])
+
+    else:
+        values[":closed_at"] = now
+        values[":closed_by"] = (
+            actor_subject
+        )
+
+        set_parts.extend([
+            "closedAt = :closed_at",
+            "closedBy = :closed_by",
+        ])
+
+        remove_parts.extend([
+            "GSI1PK",
+            "GSI1SK",
+            "GSI3PK",
+            "GSI3SK",
+        ])
+
+        if status == "DONE":
+            values[":completed_at"] = now
+
+            set_parts.append(
+                "completedAt = :completed_at"
+            )
+
+        else:
+            remove_parts.append(
+                "completedAt"
+            )
+
+    update_expression = (
+        "SET "
+        + ", ".join(set_parts)
+    )
+
+    if remove_parts:
+        update_expression += (
+            " REMOVE "
+            + ", ".join(
+                dict.fromkeys(
+                    remove_parts
+                )
+            )
+        )
+
+    response = _ops_table().update_item(
+        Key={
+            "PK":
+                current["PK"],
+            "SK":
+                current["SK"],
+        },
+        UpdateExpression=
+            update_expression,
+        ExpressionAttributeNames=
+            names,
+        ExpressionAttributeValues=
+            values,
+        ConditionExpression=(
+            "attribute_exists(PK) "
+            "AND recordType = "
+            ":follow_up_type"
+        ),
+        ReturnValues="ALL_NEW",
+    )
+
+    updated = response["Attributes"]
+
+    if (
+        status == "DONE"
+        and previous_status != "DONE"
+    ):
+        activity_type = (
+            "FOLLOWUP_COMPLETED"
+        )
+
+        summary = (
+            f"Completed follow-up: "
+            f"{title}"
+        )
+
+    elif (
+        status == "CANCELED"
+        and previous_status
+            != "CANCELED"
+    ):
+        activity_type = (
+            "FOLLOWUP_CANCELED"
+        )
+
+        summary = (
+            f"Canceled follow-up: "
+            f"{title}"
+        )
+
+    elif (
+        status == "OPEN"
+        and previous_status != "OPEN"
+    ):
+        activity_type = (
+            "FOLLOWUP_REOPENED"
+        )
+
+        summary = (
+            f"Reopened follow-up: "
+            f"{title}"
+        )
+
+    else:
+        activity_type = (
+            "FOLLOWUP_UPDATED"
+        )
+
+        summary = (
+            f"Updated follow-up: "
+            f"{title}"
+        )
+
+    _record_activity(
+        str(
+            updated.get("projectId")
+            or ""
+        ),
+        actor_subject,
+        activity_type,
+        summary,
+        {
+            "followUpId":
+                str(
+                    updated.get(
+                        "followUpId"
+                    )
+                    or ""
+                ),
+            "status":
+                status,
+            "dueAt":
+                due_at,
+            "assigneeUserId":
+                assignee_user_id,
+        },
+    )
+
+    return updated
+
+
+def _list_open_follow_ups(
+    limit: int = 100,
+) -> list[dict[str, Any]]:
+    response = _ops_table().query(
+        IndexName="GSI3",
+        KeyConditionExpression=(
+            "GSI3PK = :pk"
+        ),
+        ExpressionAttributeValues={
+            ":pk":
+                "QUEUE#FOLLOWUP#OPEN",
+        },
+        ScanIndexForward=True,
+        Limit=limit,
+    )
+
+    return [
+        item
+        for item in (
+            response.get("Items")
+            or []
+        )
+        if (
+            isinstance(item, dict)
+            and item.get("recordType")
+                == "FOLLOW_UP"
+            and item.get("status")
+                == "OPEN"
+        )
+    ]
 
 
 def _normalize_task_status(
@@ -3039,6 +3922,823 @@ def _handle_get_project(
         },
     )
 
+def _handle_list_follow_ups():
+    try:
+        items = _list_open_follow_ups()
+
+    except (
+        BotoCoreError,
+        ClientError,
+        RuntimeError,
+    ):
+        LOGGER.exception(
+            "Failed to list follow-ups"
+        )
+
+        return _response(
+            503,
+            {
+                "error":
+                    "temporarily_unavailable"
+            },
+        )
+
+    return _response(
+        200,
+        {
+            "items": [
+                _public_follow_up(item)
+                for item in items
+            ],
+            "count":
+                len(items),
+        },
+    )
+
+
+def _handle_list_project_notes(
+    event: dict[str, Any],
+):
+    parameters = (
+        event.get("pathParameters")
+        or {}
+    )
+
+    project_id = str(
+        parameters.get("projectId")
+        or ""
+    ).strip()
+
+    try:
+        if not _project_record(
+            project_id
+        ):
+            return _response(
+                404,
+                {
+                    "error":
+                        "project_not_found"
+                },
+            )
+
+        items = _list_project_children(
+            project_id,
+            "NOTE#",
+            "NOTE",
+        )
+
+        items.sort(
+            key=lambda item:
+                str(
+                    item.get("createdAt")
+                    or ""
+                ),
+            reverse=True,
+        )
+
+    except (
+        BotoCoreError,
+        ClientError,
+        RuntimeError,
+    ):
+        LOGGER.exception(
+            "Failed to list project notes"
+        )
+
+        return _response(
+            503,
+            {
+                "error":
+                    "temporarily_unavailable"
+            },
+        )
+
+    return _response(
+        200,
+        {
+            "items": [
+                _public_note(item)
+                for item in items
+            ],
+            "count":
+                len(items),
+        },
+    )
+
+
+def _handle_create_project_note(
+    event: dict[str, Any],
+    actor_subject: str,
+):
+    parameters = (
+        event.get("pathParameters")
+        or {}
+    )
+
+    project_id = str(
+        parameters.get("projectId")
+        or ""
+    ).strip()
+
+    body = _request_body(event)
+
+    if body is None:
+        return _response(
+            400,
+            {"error": "invalid_json"},
+        )
+
+    category = (
+        _normalize_note_category(
+            body.get("category")
+            or "GENERAL"
+        )
+    )
+
+    note_body = str(
+        body.get("body")
+        or ""
+    ).strip()
+
+    if not category:
+        return _response(
+            400,
+            {
+                "error":
+                    "invalid_note_category"
+            },
+        )
+
+    if not note_body:
+        return _response(
+            400,
+            {
+                "error":
+                    "note_body_required"
+            },
+        )
+
+    if len(note_body) > 6000:
+        return _response(
+            400,
+            {
+                "error":
+                    "note_body_too_long"
+            },
+        )
+
+    try:
+        if not _project_record(
+            project_id
+        ):
+            return _response(
+                404,
+                {
+                    "error":
+                        "project_not_found"
+                },
+            )
+
+        note = _create_project_note(
+            project_id,
+            category=category,
+            body=note_body,
+            actor_subject=
+                actor_subject,
+        )
+
+    except (
+        BotoCoreError,
+        ClientError,
+        RuntimeError,
+    ):
+        LOGGER.exception(
+            "Project note creation failed"
+        )
+
+        return _response(
+            503,
+            {
+                "error":
+                    "temporarily_unavailable"
+            },
+        )
+
+    return _response(
+        201,
+        {
+            "note":
+                _public_note(note),
+        },
+    )
+
+
+def _handle_update_project_note(
+    event: dict[str, Any],
+    actor_subject: str,
+):
+    parameters = (
+        event.get("pathParameters")
+        or {}
+    )
+
+    project_id = str(
+        parameters.get("projectId")
+        or ""
+    ).strip()
+
+    note_id = str(
+        parameters.get("noteId")
+        or ""
+    ).strip()
+
+    body = _request_body(event)
+
+    if body is None:
+        return _response(
+            400,
+            {"error": "invalid_json"},
+        )
+
+    category = (
+        _normalize_note_category(
+            body.get("category")
+            or "GENERAL"
+        )
+    )
+
+    note_body = str(
+        body.get("body")
+        or ""
+    ).strip()
+
+    if not category:
+        return _response(
+            400,
+            {
+                "error":
+                    "invalid_note_category"
+            },
+        )
+
+    if not note_body:
+        return _response(
+            400,
+            {
+                "error":
+                    "note_body_required"
+            },
+        )
+
+    if len(note_body) > 6000:
+        return _response(
+            400,
+            {
+                "error":
+                    "note_body_too_long"
+            },
+        )
+
+    try:
+        current = (
+            _project_child_record(
+                project_id,
+                f"NOTE#{note_id}",
+                "NOTE",
+            )
+        )
+
+        if not current:
+            return _response(
+                404,
+                {
+                    "error":
+                        "note_not_found"
+                },
+            )
+
+        updated = _update_project_note(
+            current,
+            category=category,
+            body=note_body,
+            actor_subject=
+                actor_subject,
+        )
+
+    except (
+        BotoCoreError,
+        ClientError,
+        RuntimeError,
+    ):
+        LOGGER.exception(
+            "Project note update failed"
+        )
+
+        return _response(
+            503,
+            {
+                "error":
+                    "temporarily_unavailable"
+            },
+        )
+
+    return _response(
+        200,
+        {
+            "note":
+                _public_note(updated),
+        },
+    )
+
+
+def _handle_list_project_follow_ups(
+    event: dict[str, Any],
+):
+    parameters = (
+        event.get("pathParameters")
+        or {}
+    )
+
+    project_id = str(
+        parameters.get("projectId")
+        or ""
+    ).strip()
+
+    try:
+        if not _project_record(
+            project_id
+        ):
+            return _response(
+                404,
+                {
+                    "error":
+                        "project_not_found"
+                },
+            )
+
+        items = _list_project_children(
+            project_id,
+            "FOLLOWUP#",
+            "FOLLOW_UP",
+        )
+
+        items.sort(
+            key=lambda item: (
+                str(
+                    item.get("status")
+                    or ""
+                )
+                != "OPEN",
+                str(
+                    item.get("dueAt")
+                    or ""
+                ),
+            )
+        )
+
+    except (
+        BotoCoreError,
+        ClientError,
+        RuntimeError,
+    ):
+        LOGGER.exception(
+            "Failed to list follow-ups"
+        )
+
+        return _response(
+            503,
+            {
+                "error":
+                    "temporarily_unavailable"
+            },
+        )
+
+    return _response(
+        200,
+        {
+            "items": [
+                _public_follow_up(item)
+                for item in items
+            ],
+            "count":
+                len(items),
+        },
+    )
+
+
+def _handle_create_project_follow_up(
+    event: dict[str, Any],
+    actor_subject: str,
+):
+    parameters = (
+        event.get("pathParameters")
+        or {}
+    )
+
+    project_id = str(
+        parameters.get("projectId")
+        or ""
+    ).strip()
+
+    body = _request_body(event)
+
+    if body is None:
+        return _response(
+            400,
+            {"error": "invalid_json"},
+        )
+
+    title = str(
+        body.get("title")
+        or ""
+    ).strip()
+
+    details = str(
+        body.get("details")
+        or ""
+    ).strip()
+
+    assignee_user_id = str(
+        body.get("assigneeUserId")
+        or ""
+    ).strip()
+
+    due_at = _normalize_due_at(
+        body.get("dueAt")
+    )
+
+    if not title:
+        return _response(
+            400,
+            {
+                "error":
+                    "follow_up_title_required"
+            },
+        )
+
+    if len(title) > 180:
+        return _response(
+            400,
+            {
+                "error":
+                    "follow_up_title_too_long"
+            },
+        )
+
+    if len(details) > 4000:
+        return _response(
+            400,
+            {
+                "error":
+                    "follow_up_details_too_long"
+            },
+        )
+
+    if not due_at:
+        return _response(
+            400,
+            {
+                "error":
+                    "invalid_follow_up_due_at"
+            },
+        )
+
+    try:
+        if not _project_record(
+            project_id
+        ):
+            return _response(
+                404,
+                {
+                    "error":
+                        "project_not_found"
+                },
+            )
+
+        if assignee_user_id:
+            membership = (
+                _project_member_record(
+                    project_id,
+                    assignee_user_id,
+                )
+            )
+
+            profile = _staff_record(
+                assignee_user_id
+            )
+
+            if (
+                not membership
+                or membership.get(
+                    "membershipStatus"
+                )
+                != "ACTIVE"
+                or not profile
+                or profile.get("status")
+                != "ACTIVE"
+            ):
+                return _response(
+                    409,
+                    {
+                        "error":
+                            "assignee_not_active_project_member"
+                    },
+                )
+
+        follow_up = (
+            _create_project_follow_up(
+                project_id,
+                title=title,
+                details=details,
+                assignee_user_id=
+                    assignee_user_id,
+                due_at=due_at,
+                actor_subject=
+                    actor_subject,
+            )
+        )
+
+    except (
+        BotoCoreError,
+        ClientError,
+        RuntimeError,
+    ):
+        LOGGER.exception(
+            "Follow-up creation failed"
+        )
+
+        return _response(
+            503,
+            {
+                "error":
+                    "temporarily_unavailable"
+            },
+        )
+
+    return _response(
+        201,
+        {
+            "followUp":
+                _public_follow_up(
+                    follow_up
+                ),
+        },
+    )
+
+
+def _handle_update_project_follow_up(
+    event: dict[str, Any],
+    actor_subject: str,
+):
+    parameters = (
+        event.get("pathParameters")
+        or {}
+    )
+
+    project_id = str(
+        parameters.get("projectId")
+        or ""
+    ).strip()
+
+    follow_up_id = str(
+        parameters.get("followUpId")
+        or ""
+    ).strip()
+
+    body = _request_body(event)
+
+    if body is None:
+        return _response(
+            400,
+            {"error": "invalid_json"},
+        )
+
+    try:
+        current = (
+            _project_child_record(
+                project_id,
+                (
+                    "FOLLOWUP#"
+                    f"{follow_up_id}"
+                ),
+                "FOLLOW_UP",
+            )
+        )
+
+        if not current:
+            return _response(
+                404,
+                {
+                    "error":
+                        "follow_up_not_found"
+                },
+            )
+
+        title = str(
+            body.get(
+                "title",
+                current.get("title")
+                or "",
+            )
+            or ""
+        ).strip()
+
+        details = str(
+            body.get(
+                "details",
+                current.get("details")
+                or "",
+            )
+            or ""
+        ).strip()
+
+        status = (
+            _normalize_follow_up_status(
+                body.get(
+                    "status",
+                    current.get("status")
+                    or "OPEN",
+                )
+            )
+        )
+
+        assignee_user_id = str(
+            body.get(
+                "assigneeUserId",
+                current.get(
+                    "assigneeUserId"
+                )
+                or "",
+            )
+            or ""
+        ).strip()
+
+        due_at = _normalize_due_at(
+            body.get(
+                "dueAt",
+                current.get("dueAt")
+                or "",
+            )
+        )
+
+        if not title:
+            return _response(
+                400,
+                {
+                    "error":
+                        "follow_up_title_required"
+                },
+            )
+
+        if not status:
+            return _response(
+                400,
+                {
+                    "error":
+                        "invalid_follow_up_status"
+                },
+            )
+
+        if not due_at:
+            return _response(
+                400,
+                {
+                    "error":
+                        "invalid_follow_up_due_at"
+                },
+            )
+
+        if assignee_user_id:
+            membership = (
+                _project_member_record(
+                    project_id,
+                    assignee_user_id,
+                )
+            )
+
+            profile = _staff_record(
+                assignee_user_id
+            )
+
+            if (
+                not membership
+                or membership.get(
+                    "membershipStatus"
+                )
+                != "ACTIVE"
+                or not profile
+                or profile.get("status")
+                != "ACTIVE"
+            ):
+                return _response(
+                    409,
+                    {
+                        "error":
+                            "assignee_not_active_project_member"
+                    },
+                )
+
+        updated = (
+            _update_project_follow_up(
+                current,
+                title=title,
+                details=details,
+                status=status,
+                assignee_user_id=
+                    assignee_user_id,
+                due_at=due_at,
+                actor_subject=
+                    actor_subject,
+            )
+        )
+
+    except (
+        BotoCoreError,
+        ClientError,
+        RuntimeError,
+    ):
+        LOGGER.exception(
+            "Follow-up update failed"
+        )
+
+        return _response(
+            503,
+            {
+                "error":
+                    "temporarily_unavailable"
+            },
+        )
+
+    return _response(
+        200,
+        {
+            "followUp":
+                _public_follow_up(
+                    updated
+                ),
+        },
+    )
+
+
+def _handle_list_project_activity(
+    event: dict[str, Any],
+):
+    parameters = (
+        event.get("pathParameters")
+        or {}
+    )
+
+    project_id = str(
+        parameters.get("projectId")
+        or ""
+    ).strip()
+
+    try:
+        if not _project_record(
+            project_id
+        ):
+            return _response(
+                404,
+                {
+                    "error":
+                        "project_not_found"
+                },
+            )
+
+        items = _list_project_activity(
+            project_id
+        )
+
+    except (
+        BotoCoreError,
+        ClientError,
+        RuntimeError,
+    ):
+        LOGGER.exception(
+            "Activity listing failed"
+        )
+
+        return _response(
+            503,
+            {
+                "error":
+                    "temporarily_unavailable"
+            },
+        )
+
+    return _response(
+        200,
+        {
+            "items": [
+                _public_activity(item)
+                for item in items
+            ],
+            "count":
+                len(items),
+        },
+    )
+
+
 def _handle_list_tasks():
     try:
         tasks = _list_all_tasks()
@@ -4563,6 +6263,177 @@ def handler(
             )
 
         return _handle_list_projects()
+
+    if (
+        method == "GET"
+        and path.endswith(
+            "/v1/admin/follow-ups"
+        )
+    ):
+        if identity["role"] not in {
+            "OWNER",
+            "MANAGER",
+        }:
+            return _response(
+                403,
+                {
+                    "error":
+                        "manager_or_owner_required"
+                },
+            )
+
+        return _handle_list_follow_ups()
+
+    if (
+        method == "GET"
+        and path.endswith("/notes")
+        and "/v1/admin/projects/" in path
+    ):
+        if identity["role"] not in {
+            "OWNER",
+            "MANAGER",
+        }:
+            return _response(
+                403,
+                {
+                    "error":
+                        "manager_or_owner_required"
+                },
+            )
+
+        return _handle_list_project_notes(
+            event
+        )
+
+    if (
+        method == "POST"
+        and path.endswith("/notes")
+        and "/v1/admin/projects/" in path
+    ):
+        if identity["role"] not in {
+            "OWNER",
+            "MANAGER",
+        }:
+            return _response(
+                403,
+                {
+                    "error":
+                        "manager_or_owner_required"
+                },
+            )
+
+        return _handle_create_project_note(
+            event,
+            identity["subject"],
+        )
+
+    if (
+        method == "PATCH"
+        and "/notes/" in path
+        and "/v1/admin/projects/" in path
+    ):
+        if identity["role"] not in {
+            "OWNER",
+            "MANAGER",
+        }:
+            return _response(
+                403,
+                {
+                    "error":
+                        "manager_or_owner_required"
+                },
+            )
+
+        return _handle_update_project_note(
+            event,
+            identity["subject"],
+        )
+
+    if (
+        method == "GET"
+        and path.endswith("/follow-ups")
+        and "/v1/admin/projects/" in path
+    ):
+        if identity["role"] not in {
+            "OWNER",
+            "MANAGER",
+        }:
+            return _response(
+                403,
+                {
+                    "error":
+                        "manager_or_owner_required"
+                },
+            )
+
+        return _handle_list_project_follow_ups(
+            event
+        )
+
+    if (
+        method == "POST"
+        and path.endswith("/follow-ups")
+        and "/v1/admin/projects/" in path
+    ):
+        if identity["role"] not in {
+            "OWNER",
+            "MANAGER",
+        }:
+            return _response(
+                403,
+                {
+                    "error":
+                        "manager_or_owner_required"
+                },
+            )
+
+        return _handle_create_project_follow_up(
+            event,
+            identity["subject"],
+        )
+
+    if (
+        method == "PATCH"
+        and "/follow-ups/" in path
+        and "/v1/admin/projects/" in path
+    ):
+        if identity["role"] not in {
+            "OWNER",
+            "MANAGER",
+        }:
+            return _response(
+                403,
+                {
+                    "error":
+                        "manager_or_owner_required"
+                },
+            )
+
+        return _handle_update_project_follow_up(
+            event,
+            identity["subject"],
+        )
+
+    if (
+        method == "GET"
+        and path.endswith("/activity")
+        and "/v1/admin/projects/" in path
+    ):
+        if identity["role"] not in {
+            "OWNER",
+            "MANAGER",
+        }:
+            return _response(
+                403,
+                {
+                    "error":
+                        "manager_or_owner_required"
+                },
+            )
+
+        return _handle_list_project_activity(
+            event
+        )
 
     if (
         method == "GET"

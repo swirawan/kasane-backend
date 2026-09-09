@@ -475,6 +475,62 @@ Resources:
             Path: /v1/admin/projects/{projectId}
             Method: GET
 
+        ListFollowUps:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref AdminApi
+            Path: /v1/admin/follow-ups
+            Method: GET
+
+        ListProjectNotes:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref AdminApi
+            Path: /v1/admin/projects/{projectId}/notes
+            Method: GET
+
+        CreateProjectNote:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref AdminApi
+            Path: /v1/admin/projects/{projectId}/notes
+            Method: POST
+
+        UpdateProjectNote:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref AdminApi
+            Path: /v1/admin/projects/{projectId}/notes/{noteId}
+            Method: PATCH
+
+        ListProjectFollowUps:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref AdminApi
+            Path: /v1/admin/projects/{projectId}/follow-ups
+            Method: GET
+
+        CreateProjectFollowUp:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref AdminApi
+            Path: /v1/admin/projects/{projectId}/follow-ups
+            Method: POST
+
+        UpdateProjectFollowUp:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref AdminApi
+            Path: /v1/admin/projects/{projectId}/follow-ups/{followUpId}
+            Method: PATCH
+
+        ListProjectActivity:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref AdminApi
+            Path: /v1/admin/projects/{projectId}/activity
+            Method: GET
+
         ListTasks:
           Type: HttpApi
           Properties:
