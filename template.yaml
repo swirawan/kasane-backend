@@ -135,9 +135,25 @@ Resources:
       AttributeDefinitions:
         - AttributeName: reference
           AttributeType: S
+        - AttributeName: LeadIndexPK
+          AttributeType: S
+        - AttributeName: LeadIndexSK
+          AttributeType: S
+
       KeySchema:
         - AttributeName: reference
           KeyType: HASH
+
+      GlobalSecondaryIndexes:
+        - IndexName: LeadCreatedAtIndex
+          KeySchema:
+            - AttributeName: LeadIndexPK
+              KeyType: HASH
+            - AttributeName: LeadIndexSK
+              KeyType: RANGE
+          Projection:
+            ProjectionType: ALL
+
       SSESpecification:
         SSEEnabled: true
       PointInTimeRecoverySpecification:
@@ -384,12 +400,16 @@ Resources:
       Environment:
         Variables:
           OPS_TABLE_NAME: !Ref OpsTable
+          LEADS_TABLE_NAME: !Ref LeadsTable
           STAFF_USER_POOL_ID: !Ref StaffUserPool
           STAGE: !Ref StageName
 
       Policies:
         - DynamoDBCrudPolicy:
             TableName: !Ref OpsTable
+
+        - DynamoDBReadPolicy:
+            TableName: !Ref LeadsTable
 
         - Statement:
             - Effect: Allow
@@ -410,6 +430,20 @@ Resources:
           Properties:
             ApiId: !Ref AdminApi
             Path: /v1/admin/me
+            Method: GET
+
+        ListLeads:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref AdminApi
+            Path: /v1/admin/leads
+            Method: GET
+
+        GetLead:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref AdminApi
+            Path: /v1/admin/leads/{reference}
             Method: GET
 
         ListStaff:

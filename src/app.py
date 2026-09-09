@@ -403,14 +403,20 @@ def _store_lead(
             reference = _reference()
             now = int(time.time())
 
+            created_at = datetime.now(
+                timezone.utc
+            ).isoformat()
+
             item = {
                 **lead,
                 "reference": reference,
                 "recordType": "EVENT_BRIEF",
                 "stage": STAGE,
-                "createdAt": datetime.now(
-                    timezone.utc
-                ).isoformat(),
+                "createdAt": created_at,
+                "LeadIndexPK": "LEADS",
+                "LeadIndexSK": (
+                    f"{created_at}#{reference}"
+                ),
                 "expiresAt": (
                     now
                     + LEAD_RETENTION_DAYS * 86400
@@ -486,6 +492,10 @@ def _store_lead(
             "recordType": "EVENT_BRIEF",
             "stage": STAGE,
             "createdAt": created_at,
+            "LeadIndexPK": "LEADS",
+            "LeadIndexSK": (
+                f"{created_at}#{reference}"
+            ),
             "expiresAt": expires_at,
         }
 

@@ -16,6 +16,7 @@ LOGGER.setLevel(os.getenv("LOG_LEVEL", "INFO"))
 
 STAGE = os.environ.get("STAGE", "dev")
 OPS_TABLE_NAME = os.environ.get("OPS_TABLE_NAME", "")
+LEADS_TABLE_NAME = os.environ.get("LEADS_TABLE_NAME", "")
 STAFF_USER_POOL_ID = os.environ.get(
     "STAFF_USER_POOL_ID",
     "",
@@ -35,6 +36,7 @@ STAFF_STATUSES = (
 )
 
 _ops_table_instance = None
+_leads_table_instance = None
 _cognito_client_instance = None
 
 
@@ -79,6 +81,158 @@ def _ops_table():
         )
 
     return _ops_table_instance
+
+
+def _leads_table():
+    global _leads_table_instance
+
+    if not LEADS_TABLE_NAME:
+        raise RuntimeError(
+            "leads_table_not_configured"
+        )
+
+    if _leads_table_instance is None:
+        _leads_table_instance = (
+            boto3.resource("dynamodb")
+            .Table(LEADS_TABLE_NAME)
+        )
+
+    return _leads_table_instance
+
+
+def _public_lead(
+    item: dict[str, Any],
+    *,
+    detail: bool = False,
+) -> dict[str, Any]:
+    lead = {
+        "reference": str(
+            item.get("reference")
+            or ""
+        ),
+        "createdAt": str(
+            item.get("createdAt")
+            or ""
+        ),
+        "language": str(
+            item.get("language")
+            or "en"
+        ),
+        "name": str(
+            item.get("name")
+            or ""
+        ),
+        "phone": str(
+            item.get("phone")
+            or ""
+        ),
+        "email": str(
+            item.get("email")
+            or ""
+        ),
+        "preferredContact": str(
+            item.get("preferredContact")
+            or ""
+        ),
+        "eventType": str(
+            item.get("eventType")
+            or ""
+        ),
+        "product": str(
+            item.get("product")
+            or ""
+        ),
+        "package": str(
+            item.get("package")
+            or ""
+        ),
+        "direction": str(
+            item.get("direction")
+            or ""
+        ),
+        "city": str(
+            item.get("city")
+            or ""
+        ),
+        "date": str(
+            item.get("date")
+            or ""
+        ),
+        "guests": str(
+            item.get("guests")
+            or ""
+        ),
+    }
+
+    if detail:
+        lead["message"] = str(
+            item.get("message")
+            or ""
+        )
+
+        lead["page"] = str(
+            item.get("page")
+            or ""
+        )
+
+    return lead
+
+
+def _list_leads(
+    limit: int = 50,
+) -> list[dict[str, Any]]:
+    response = _leads_table().query(
+        IndexName="LeadCreatedAtIndex",
+        KeyConditionExpression=(
+            "LeadIndexPK = :pk"
+        ),
+        ExpressionAttributeValues={
+            ":pk": "LEADS",
+        },
+        ScanIndexForward=False,
+        Limit=limit,
+    )
+
+    items = response.get("Items") or []
+
+    return [
+        item
+        for item in items
+        if (
+            isinstance(item, dict)
+            and item.get("recordType")
+                == "EVENT_BRIEF"
+        )
+    ]
+
+
+def _lead_record(
+    reference: str,
+) -> dict[str, Any] | None:
+    if (
+        not reference
+        or not reference.startswith("KAS-")
+        or len(reference) > 80
+    ):
+        return None
+
+    response = _leads_table().get_item(
+        Key={
+            "reference": reference,
+        },
+        ConsistentRead=True,
+    )
+
+    item = response.get("Item")
+
+    if (
+        not isinstance(item, dict)
+        or item.get("recordType")
+            != "EVENT_BRIEF"
+    ):
+        return None
+
+    return item
 
 
 def _cognito():
@@ -1001,6 +1155,100 @@ def _me_response(
     )
 
 
+def _handle_list_leads():
+    try:
+        items = _list_leads()
+
+    except (
+        BotoCoreError,
+        ClientError,
+        RuntimeError,
+    ):
+        LOGGER.exception(
+            "Failed to list leads"
+        )
+
+        return _response(
+            503,
+            {
+                "error":
+                    "temporarily_unavailable"
+            },
+        )
+
+    return _response(
+        200,
+        {
+            "items": [
+                _public_lead(item)
+                for item in items
+            ],
+            "count": len(items),
+        },
+    )
+
+
+def _handle_get_lead(
+    event: dict[str, Any],
+):
+    parameters = (
+        event.get("pathParameters")
+        or {}
+    )
+
+    reference = str(
+        parameters.get("reference")
+        or ""
+    ).strip()
+
+    if not reference:
+        return _response(
+            400,
+            {
+                "error":
+                    "reference_required"
+            },
+        )
+
+    try:
+        item = _lead_record(
+            reference
+        )
+
+    except (
+        BotoCoreError,
+        ClientError,
+        RuntimeError,
+    ):
+        LOGGER.exception(
+            "Failed to read lead"
+        )
+
+        return _response(
+            503,
+            {
+                "error":
+                    "temporarily_unavailable"
+            },
+        )
+
+    if not item:
+        return _response(
+            404,
+            {"error": "lead_not_found"},
+        )
+
+    return _response(
+        200,
+        {
+            "lead": _public_lead(
+                item,
+                detail=True,
+            ),
+        },
+    )
+
+
 def _handle_list_staff():
     try:
         staff = _list_staff_records()
@@ -1414,6 +1662,46 @@ def handler(
         )
     ):
         return _me_response(identity)
+
+    if (
+        method == "GET"
+        and path.endswith(
+            "/v1/admin/leads"
+        )
+    ):
+        if identity["role"] not in {
+            "OWNER",
+            "MANAGER",
+        }:
+            return _response(
+                403,
+                {
+                    "error":
+                        "manager_or_owner_required"
+                },
+            )
+
+        return _handle_list_leads()
+
+    if (
+        method == "GET"
+        and "/v1/admin/leads/" in path
+    ):
+        if identity["role"] not in {
+            "OWNER",
+            "MANAGER",
+        }:
+            return _response(
+                403,
+                {
+                    "error":
+                        "manager_or_owner_required"
+                },
+            )
+
+        return _handle_get_lead(
+            event
+        )
 
     if identity["role"] != "OWNER":
         return _response(
