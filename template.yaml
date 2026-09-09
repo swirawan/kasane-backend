@@ -482,6 +482,41 @@ Resources:
             Path: /v1/admin/projects/{projectId}/color
             Method: PATCH
 
+        CompleteProject:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref AdminApi
+            Path: /v1/admin/projects/{projectId}/complete
+            Method: POST
+
+        ReopenProject:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref AdminApi
+            Path: /v1/admin/projects/{projectId}/reopen
+            Method: POST
+
+        ArchiveProject:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref AdminApi
+            Path: /v1/admin/projects/{projectId}/archive
+            Method: POST
+
+        RestoreProject:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref AdminApi
+            Path: /v1/admin/projects/{projectId}/restore
+            Method: POST
+
+        CancelProject:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref AdminApi
+            Path: /v1/admin/projects/{projectId}/cancel
+            Method: POST
+
         ListFollowUps:
           Type: HttpApi
           Properties:

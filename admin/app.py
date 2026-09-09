@@ -60,6 +60,14 @@ PROJECT_ROLES = (
     "VENDOR_LIAISON",
 )
 
+PROJECT_STATUSES = (
+    "ACTIVE",
+    "COMPLETED",
+    "CANCELLED",
+    "ARCHIVED",
+)
+
+
 TASK_STATUSES = (
     "TODO",
     "IN_PROGRESS",
@@ -630,6 +638,58 @@ def _public_project(
             item.get("updatedAt")
             or ""
         ),
+        "completedAt": str(
+            item.get("completedAt")
+            or ""
+        ),
+        "completedBy": str(
+            item.get("completedBy")
+            or ""
+        ),
+        "completionNote": str(
+            item.get("completionNote")
+            or ""
+        ),
+        "cancelledAt": str(
+            item.get("cancelledAt")
+            or ""
+        ),
+        "cancelledBy": str(
+            item.get("cancelledBy")
+            or ""
+        ),
+        "cancellationReason": str(
+            item.get("cancellationReason")
+            or ""
+        ),
+        "archivedAt": str(
+            item.get("archivedAt")
+            or ""
+        ),
+        "archivedBy": str(
+            item.get("archivedBy")
+            or ""
+        ),
+        "restoredAt": str(
+            item.get("restoredAt")
+            or ""
+        ),
+        "restoredBy": str(
+            item.get("restoredBy")
+            or ""
+        ),
+        "reopenedAt": str(
+            item.get("reopenedAt")
+            or ""
+        ),
+        "reopenedBy": str(
+            item.get("reopenedBy")
+            or ""
+        ),
+        "reopenReason": str(
+            item.get("reopenReason")
+            or ""
+        ),
     }
 
 
@@ -860,6 +920,950 @@ def _list_projects(
                 == "PROJECT"
         )
     ]
+
+
+class ProjectLifecycleConflict(Exception):
+    def __init__(
+        self,
+        code: str,
+    ):
+        super().__init__(code)
+        self.code = code
+
+
+def _can_view_project(
+    identity: dict[str, Any],
+    project: dict[str, Any],
+) -> bool:
+    if identity["role"] in {
+        "OWNER",
+        "MANAGER",
+    }:
+        return True
+
+    project_id = str(
+        project.get("projectId")
+        or ""
+    )
+
+    subject = str(
+        identity.get("subject")
+        or ""
+    )
+
+    if not project_id or not subject:
+        return False
+
+    membership = _project_member_record(
+        project_id,
+        subject,
+    )
+
+    if not membership:
+        return False
+
+    status = str(
+        project.get("status")
+        or "ACTIVE"
+    )
+
+    membership_status = str(
+        membership.get(
+            "membershipStatus"
+        )
+        or ""
+    )
+
+    if status == "ARCHIVED":
+        return True
+
+    return membership_status == "ACTIVE"
+
+
+def _project_read_access_error(
+    event: dict[str, Any],
+    identity: dict[str, Any],
+):
+    if identity["role"] in {
+        "OWNER",
+        "MANAGER",
+    }:
+        return None
+
+    parameters = (
+        event.get("pathParameters")
+        or {}
+    )
+
+    project_id = str(
+        parameters.get("projectId")
+        or ""
+    ).strip()
+
+    if not project_id:
+        return _response(
+            400,
+            {
+                "error":
+                    "project_id_required"
+            },
+        )
+
+    try:
+        project = _project_record(
+            project_id
+        )
+
+    except (
+        BotoCoreError,
+        ClientError,
+        RuntimeError,
+    ):
+        LOGGER.exception(
+            "Failed to authorize "
+            "project read access"
+        )
+
+        return _response(
+            503,
+            {
+                "error":
+                    "temporarily_unavailable"
+            },
+        )
+
+    if not project:
+        return _response(
+            404,
+            {
+                "error":
+                    "project_not_found"
+            },
+        )
+
+    if not _can_view_project(
+        identity,
+        project,
+    ):
+        return _response(
+            403,
+            {
+                "error":
+                    "project_access_required"
+            },
+        )
+
+    return None
+
+
+def _can_complete_project(
+    identity: dict[str, Any],
+    project: dict[str, Any],
+) -> bool:
+    if identity["role"] in {
+        "OWNER",
+        "MANAGER",
+    }:
+        return True
+
+    project_id = str(
+        project.get("projectId")
+        or ""
+    )
+
+    subject = str(
+        identity.get("subject")
+        or ""
+    )
+
+    if not project_id or not subject:
+        return False
+
+    membership = _project_member_record(
+        project_id,
+        subject,
+    )
+
+    if not membership:
+        return False
+
+    return (
+        membership.get(
+            "membershipStatus"
+        )
+        == "ACTIVE"
+        and membership.get(
+            "projectRole"
+        )
+        == "PROJECT_LEAD"
+    )
+
+
+def _project_status_sort_key(
+    project: dict[str, Any],
+    status: str,
+) -> str:
+    event_date = str(
+        project.get("eventDate")
+        or ""
+    ).strip()
+
+    project_id = str(
+        project.get("projectId")
+        or ""
+    )
+
+    return (
+        f"STATUS#{status}"
+        f"#DATE#{event_date or '9999-12-31'}"
+        f"#PROJECT#{project_id}"
+    )
+
+
+def _project_open_work_summary(
+    project_id: str,
+) -> dict[str, int]:
+    tasks = _list_project_children(
+        project_id,
+        "TASK#",
+        "TASK",
+    )
+
+    follow_ups = _list_project_children(
+        project_id,
+        "FOLLOWUP#",
+        "FOLLOW_UP",
+    )
+
+    open_tasks = sum(
+        1
+        for item in tasks
+        if str(
+            item.get("status")
+            or "TODO"
+        )
+        != "DONE"
+    )
+
+    open_follow_ups = sum(
+        1
+        for item in follow_ups
+        if str(
+            item.get("status")
+            or "OPEN"
+        )
+        == "OPEN"
+    )
+
+    return {
+        "openTasks":
+            open_tasks,
+        "openFollowUps":
+            open_follow_ups,
+    }
+
+
+def _lifecycle_target_status(
+    current_status: str,
+    action: str,
+    pre_archive_status: str = "",
+) -> str:
+    if (
+        action == "complete"
+        and current_status == "ACTIVE"
+    ):
+        return "COMPLETED"
+
+    if (
+        action == "cancel"
+        and current_status == "ACTIVE"
+    ):
+        return "CANCELLED"
+
+    if (
+        action == "reopen"
+        and current_status == "COMPLETED"
+    ):
+        return "ACTIVE"
+
+    if (
+        action == "archive"
+        and current_status in {
+            "COMPLETED",
+            "CANCELLED",
+        }
+    ):
+        return "ARCHIVED"
+
+    if (
+        action == "restore"
+        and current_status == "ARCHIVED"
+    ):
+        if pre_archive_status in {
+            "COMPLETED",
+            "CANCELLED",
+        }:
+            return pre_archive_status
+
+        return "COMPLETED"
+
+    raise ProjectLifecycleConflict(
+        "invalid_project_transition"
+    )
+
+
+def _transition_project(
+    current: dict[str, Any],
+    action: str,
+    actor_subject: str,
+    note: str = "",
+) -> dict[str, Any]:
+    project_id = str(
+        current.get("projectId")
+        or ""
+    )
+
+    current_status = str(
+        current.get("status")
+        or "ACTIVE"
+    )
+
+    target_status = (
+        _lifecycle_target_status(
+            current_status,
+            action,
+            str(
+                current.get(
+                    "preArchiveStatus"
+                )
+                or ""
+            ),
+        )
+    )
+
+    now = _utcnow()
+
+    names = {
+        "#status": "status",
+    }
+
+    values: dict[str, Any] = {
+        ":new_status":
+            target_status,
+        ":expected_status":
+            current_status,
+        ":updated":
+            now,
+        ":actor":
+            actor_subject,
+        ":project_type":
+            "PROJECT",
+        ":gsi":
+            _project_status_sort_key(
+                current,
+                target_status,
+            ),
+    }
+
+    set_parts = [
+        "#status = :new_status",
+        "updatedAt = :updated",
+        "updatedBy = :actor",
+        "GSI3SK = :gsi",
+    ]
+
+    remove_parts: list[str] = []
+
+    activity_type = ""
+    summary = ""
+    metadata: dict[str, Any] = {
+        "previousStatus":
+            current_status,
+        "status":
+            target_status,
+    }
+
+    if action == "complete":
+        values[":completed"] = now
+        values[":note"] = note
+
+        set_parts.extend([
+            "completedAt = :completed",
+            "completedBy = :actor",
+            "completionNote = :note",
+        ])
+
+        activity_type = (
+            "PROJECT_COMPLETED"
+        )
+
+        summary = "Completed project"
+
+        metadata["completionNote"] = (
+            note
+        )
+
+    elif action == "reopen":
+        values[":reopened"] = now
+        values[":reason"] = note
+
+        set_parts.extend([
+            "reopenedAt = :reopened",
+            "reopenedBy = :actor",
+            "reopenReason = :reason",
+        ])
+
+        remove_parts.extend([
+            "completedAt",
+            "completedBy",
+            "completionNote",
+        ])
+
+        activity_type = (
+            "PROJECT_REOPENED"
+        )
+
+        summary = "Reopened project"
+
+        metadata["reason"] = note
+
+    elif action == "cancel":
+        values[":cancelled"] = now
+        values[":reason"] = note
+
+        set_parts.extend([
+            "cancelledAt = :cancelled",
+            "cancelledBy = :actor",
+            "cancellationReason = :reason",
+        ])
+
+        activity_type = (
+            "PROJECT_CANCELLED"
+        )
+
+        summary = "Cancelled project"
+
+        metadata["reason"] = note
+
+    elif action == "archive":
+        values[":archived"] = now
+        values[":pre_archive"] = (
+            current_status
+        )
+
+        set_parts.extend([
+            "archivedAt = :archived",
+            "archivedBy = :actor",
+            "preArchiveStatus = :pre_archive",
+        ])
+
+        activity_type = (
+            "PROJECT_ARCHIVED"
+        )
+
+        summary = "Archived project"
+
+        if note:
+            metadata["note"] = note
+
+    elif action == "restore":
+        values[":restored"] = now
+
+        set_parts.extend([
+            "restoredAt = :restored",
+            "restoredBy = :actor",
+        ])
+
+        remove_parts.append(
+            "preArchiveStatus"
+        )
+
+        activity_type = (
+            "PROJECT_RESTORED"
+        )
+
+        summary = "Restored project"
+
+    update_expression = (
+        "SET "
+        + ", ".join(set_parts)
+    )
+
+    if remove_parts:
+        update_expression += (
+            " REMOVE "
+            + ", ".join(remove_parts)
+        )
+
+    activity_id = _new_record_id(
+        "ACT"
+    )
+
+    activity_item = {
+        "PK":
+            f"PROJECT#{project_id}",
+        "SK":
+            (
+                f"ACTIVITY#{now}"
+                f"#{activity_id}"
+            ),
+        "recordType":
+            "ACTIVITY",
+        "activityId":
+            activity_id,
+        "projectId":
+            project_id,
+        "activityType":
+            activity_type,
+        "summary":
+            summary,
+        "actorUserId":
+            actor_subject,
+        "metadata":
+            metadata,
+        "createdAt":
+            now,
+    }
+
+    boto3.client(
+        "dynamodb"
+    ).transact_write_items(
+        TransactItems=[
+            {
+                "Update": {
+                    "TableName":
+                        OPS_TABLE_NAME,
+                    "Key":
+                        _serialize_map({
+                            "PK":
+                                f"PROJECT#{project_id}",
+                            "SK":
+                                "META",
+                        }),
+                    "UpdateExpression":
+                        update_expression,
+                    "ConditionExpression": (
+                        "attribute_exists(PK) "
+                        "AND recordType = "
+                        ":project_type "
+                        "AND #status = "
+                        ":expected_status"
+                    ),
+                    "ExpressionAttributeNames":
+                        names,
+                    "ExpressionAttributeValues":
+                        _serialize_map(
+                            values
+                        ),
+                }
+            },
+            {
+                "Put": {
+                    "TableName":
+                        OPS_TABLE_NAME,
+                    "Item":
+                        _serialize_map(
+                            activity_item
+                        ),
+                    "ConditionExpression": (
+                        "attribute_not_exists(PK) "
+                        "AND "
+                        "attribute_not_exists(SK)"
+                    ),
+                }
+            },
+        ]
+    )
+
+    updated = _project_record(
+        project_id
+    )
+
+    if not updated:
+        raise RuntimeError(
+            "project_missing_after_transition"
+        )
+
+    return updated
+
+
+def _optional_request_body(
+    event: dict[str, Any],
+) -> dict[str, Any] | None:
+    raw = event.get("body")
+
+    if raw in {
+        None,
+        "",
+    }:
+        return {}
+
+    return _request_body(event)
+
+
+def _handle_project_lifecycle(
+    event: dict[str, Any],
+    identity: dict[str, Any],
+    action: str,
+):
+    parameters = (
+        event.get("pathParameters")
+        or {}
+    )
+
+    project_id = str(
+        parameters.get("projectId")
+        or ""
+    ).strip()
+
+    if not project_id:
+        return _response(
+            400,
+            {
+                "error":
+                    "project_id_required"
+            },
+        )
+
+    body = _optional_request_body(
+        event
+    )
+
+    if body is None:
+        return _response(
+            400,
+            {"error": "invalid_json"},
+        )
+
+    try:
+        current = _project_record(
+            project_id
+        )
+
+    except (
+        BotoCoreError,
+        ClientError,
+        RuntimeError,
+    ):
+        LOGGER.exception(
+            "Failed to read project "
+            "for lifecycle transition"
+        )
+
+        return _response(
+            503,
+            {
+                "error":
+                    "temporarily_unavailable"
+            },
+        )
+
+    if not current:
+        return _response(
+            404,
+            {
+                "error":
+                    "project_not_found"
+            },
+        )
+
+    if action == "complete":
+        if not _can_complete_project(
+            identity,
+            current,
+        ):
+            return _response(
+                403,
+                {
+                    "error":
+                        "project_complete_forbidden"
+                },
+            )
+
+    elif identity["role"] not in {
+        "OWNER",
+        "MANAGER",
+    }:
+        return _response(
+            403,
+            {
+                "error":
+                    "manager_or_owner_required"
+            },
+        )
+
+    note = str(
+        body.get("note")
+        or body.get("reason")
+        or ""
+    ).strip()
+
+    if len(note) > 2000:
+        return _response(
+            400,
+            {
+                "error":
+                    "lifecycle_note_too_long"
+            },
+        )
+
+    if (
+        action in {
+            "cancel",
+            "reopen",
+        }
+        and not note
+    ):
+        return _response(
+            400,
+            {
+                "error":
+                    "reason_required"
+            },
+        )
+
+    if action == "complete":
+        try:
+            open_work = (
+                _project_open_work_summary(
+                    project_id
+                )
+            )
+
+        except (
+            BotoCoreError,
+            ClientError,
+            RuntimeError,
+        ):
+            LOGGER.exception(
+                "Failed to inspect "
+                "project open work"
+            )
+
+            return _response(
+                503,
+                {
+                    "error":
+                        "temporarily_unavailable"
+                },
+            )
+
+        force_requested = (
+            body.get("force")
+            is True
+        )
+
+        can_force = (
+            identity["role"]
+            in {
+                "OWNER",
+                "MANAGER",
+            }
+        )
+
+        if (
+            force_requested
+            and not can_force
+        ):
+            return _response(
+                403,
+                {
+                    "error":
+                        "project_force_complete_forbidden"
+                },
+            )
+
+        force = (
+            force_requested
+            and can_force
+        )
+
+        has_open_work = (
+            open_work["openTasks"] > 0
+            or open_work[
+                "openFollowUps"
+            ] > 0
+        )
+
+        if (
+            has_open_work
+            and force
+            and not note
+        ):
+            return _response(
+                400,
+                {
+                    "error":
+                        "completion_note_required"
+                },
+            )
+
+        if (
+            has_open_work
+            and not force
+        ):
+            return _response(
+                409,
+                {
+                    "error":
+                        "open_work_remaining",
+                    **open_work,
+                },
+            )
+
+    if (
+        action == "archive"
+        and str(
+            current.get("status")
+            or ""
+        )
+        == "COMPLETED"
+    ):
+        try:
+            archive_work = (
+                _project_open_work_summary(
+                    project_id
+                )
+            )
+
+        except (
+            BotoCoreError,
+            ClientError,
+            RuntimeError,
+        ):
+            LOGGER.exception(
+                "Failed to inspect "
+                "project work before archive"
+            )
+
+            return _response(
+                503,
+                {
+                    "error":
+                        "temporarily_unavailable"
+                },
+            )
+
+        archive_has_open_work = (
+            archive_work["openTasks"] > 0
+            or archive_work[
+                "openFollowUps"
+            ] > 0
+        )
+
+        archive_force = (
+            body.get("force")
+            is True
+        )
+
+        if (
+            archive_has_open_work
+            and not archive_force
+        ):
+            return _response(
+                409,
+                {
+                    "error":
+                        "open_work_remaining",
+                    **archive_work,
+                },
+            )
+
+        if (
+            archive_has_open_work
+            and archive_force
+            and not note
+        ):
+            return _response(
+                400,
+                {
+                    "error":
+                        "archive_note_required"
+                },
+            )
+
+    try:
+        updated = _transition_project(
+            current,
+            action,
+            identity["subject"],
+            note,
+        )
+
+    except ProjectLifecycleConflict as exc:
+        return _response(
+            409,
+            {
+                "error":
+                    exc.code,
+                "currentStatus":
+                    str(
+                        current.get("status")
+                        or ""
+                    ),
+                "action":
+                    action,
+            },
+        )
+
+    except ClientError as exc:
+        code = str(
+            exc.response.get(
+                "Error",
+                {}
+            ).get(
+                "Code",
+                ""
+            )
+        )
+
+        if code in {
+            "ConditionalCheckFailedException",
+            "TransactionCanceledException",
+        }:
+            return _response(
+                409,
+                {
+                    "error":
+                        "project_state_changed"
+                },
+            )
+
+        LOGGER.exception(
+            "Project lifecycle update failed"
+        )
+
+        return _response(
+            503,
+            {
+                "error":
+                    "temporarily_unavailable"
+            },
+        )
+
+    except (
+        BotoCoreError,
+        RuntimeError,
+    ):
+        LOGGER.exception(
+            "Project lifecycle update failed"
+        )
+
+        return _response(
+            503,
+            {
+                "error":
+                    "temporarily_unavailable"
+            },
+        )
+
+    return _response(
+        200,
+        {
+            "project":
+                _public_project(updated)
+        },
+    )
 
 
 def _convert_lead(
@@ -2785,8 +3789,7 @@ def _unassign_project_member(
             "membershipStatus = :status, "
             "unassignedAt = :now, "
             "updatedAt = :now, "
-            "updatedBy = :actor "
-            "REMOVE GSI2PK, GSI2SK"
+            "updatedBy = :actor"
         ),
         ExpressionAttributeValues={
             ":status":
@@ -4066,9 +5069,24 @@ def _handle_convert_lead(
     )
 
 
-def _handle_list_projects():
+def _handle_list_projects(
+    identity: dict[str, Any],
+):
     try:
         projects = _list_projects()
+
+        if identity["role"] not in {
+            "OWNER",
+            "MANAGER",
+        }:
+            projects = [
+                project
+                for project in projects
+                if _can_view_project(
+                    identity,
+                    project,
+                )
+            ]
 
     except (
         BotoCoreError,
@@ -4101,6 +5119,7 @@ def _handle_list_projects():
 
 def _handle_get_project(
     event: dict[str, Any],
+    identity: dict[str, Any],
 ):
     parameters = (
         event.get("pathParameters")
@@ -4149,6 +5168,18 @@ def _handle_get_project(
             {
                 "error":
                     "project_not_found"
+            },
+        )
+
+    if not _can_view_project(
+        identity,
+        project,
+    ):
+        return _response(
+            403,
+            {
+                "error":
+                    "project_access_required"
             },
         )
 
@@ -6488,19 +7519,9 @@ def handler(
             "/v1/admin/projects"
         )
     ):
-        if identity["role"] not in {
-            "OWNER",
-            "MANAGER",
-        }:
-            return _response(
-                403,
-                {
-                    "error":
-                        "manager_or_owner_required"
-                },
-            )
-
-        return _handle_list_projects()
+        return _handle_list_projects(
+            identity
+        )
 
     if (
         method == "GET"
@@ -6527,17 +7548,15 @@ def handler(
         and path.endswith("/notes")
         and "/v1/admin/projects/" in path
     ):
-        if identity["role"] not in {
-            "OWNER",
-            "MANAGER",
-        }:
-            return _response(
-                403,
-                {
-                    "error":
-                        "manager_or_owner_required"
-                },
+        access_error = (
+            _project_read_access_error(
+                event,
+                identity,
             )
+        )
+
+        if access_error:
+            return access_error
 
         return _handle_list_project_notes(
             event
@@ -6592,17 +7611,15 @@ def handler(
         and path.endswith("/follow-ups")
         and "/v1/admin/projects/" in path
     ):
-        if identity["role"] not in {
-            "OWNER",
-            "MANAGER",
-        }:
-            return _response(
-                403,
-                {
-                    "error":
-                        "manager_or_owner_required"
-                },
+        access_error = (
+            _project_read_access_error(
+                event,
+                identity,
             )
+        )
+
+        if access_error:
+            return access_error
 
         return _handle_list_project_follow_ups(
             event
@@ -6657,17 +7674,15 @@ def handler(
         and path.endswith("/activity")
         and "/v1/admin/projects/" in path
     ):
-        if identity["role"] not in {
-            "OWNER",
-            "MANAGER",
-        }:
-            return _response(
-                403,
-                {
-                    "error":
-                        "manager_or_owner_required"
-                },
+        access_error = (
+            _project_read_access_error(
+                event,
+                identity,
             )
+        )
+
+        if access_error:
+            return access_error
 
         return _handle_list_project_activity(
             event
@@ -6698,17 +7713,15 @@ def handler(
         and path.endswith("/tasks")
         and "/v1/admin/projects/" in path
     ):
-        if identity["role"] not in {
-            "OWNER",
-            "MANAGER",
-        }:
-            return _response(
-                403,
-                {
-                    "error":
-                        "manager_or_owner_required"
-                },
+        access_error = (
+            _project_read_access_error(
+                event,
+                identity,
             )
+        )
+
+        if access_error:
+            return access_error
 
         return _handle_list_project_tasks(
             event
@@ -6763,17 +7776,15 @@ def handler(
         and path.endswith("/members")
         and "/v1/admin/projects/" in path
     ):
-        if identity["role"] not in {
-            "OWNER",
-            "MANAGER",
-        }:
-            return _response(
-                403,
-                {
-                    "error":
-                        "manager_or_owner_required"
-                },
+        access_error = (
+            _project_read_access_error(
+                event,
+                identity,
             )
+        )
+
+        if access_error:
+            return access_error
 
         return _handle_list_project_members(
             event
@@ -6849,6 +7860,28 @@ def handler(
         )
 
     if (
+        method == "POST"
+        and "/v1/admin/projects/" in path
+    ):
+        for lifecycle_action in (
+            "complete",
+            "reopen",
+            "archive",
+            "restore",
+            "cancel",
+        ):
+            if path.endswith(
+                f"/{lifecycle_action}"
+            ):
+                return (
+                    _handle_project_lifecycle(
+                        event,
+                        identity,
+                        lifecycle_action,
+                    )
+                )
+
+    if (
         method == "PATCH"
         and path.endswith("/color")
         and "/v1/admin/projects/" in path
@@ -6874,20 +7907,9 @@ def handler(
         method == "GET"
         and "/v1/admin/projects/" in path
     ):
-        if identity["role"] not in {
-            "OWNER",
-            "MANAGER",
-        }:
-            return _response(
-                403,
-                {
-                    "error":
-                        "manager_or_owner_required"
-                },
-            )
-
         return _handle_get_project(
-            event
+            event,
+            identity,
         )
 
     if (

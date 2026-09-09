@@ -341,7 +341,33 @@ def test_owner_can_list_projects():
     assert body(response)["count"] == 1
 
 
-def test_worker_cannot_list_all_projects():
+def test_worker_lists_assigned_projects_only():
+    assigned = project()
+
+    hidden = project()
+    hidden["PK"] = "PROJECT#KAS-002"
+    hidden["projectId"] = "KAS-002"
+
+    def membership(
+        project_id,
+        user_id,
+    ):
+        if project_id == "KAS-001":
+            return {
+                "recordType":
+                    "PROJECT_MEMBERSHIP",
+                "projectId":
+                    project_id,
+                "userId":
+                    user_id,
+                "projectRole":
+                    "WORKER",
+                "membershipStatus":
+                    "ACTIVE",
+            }
+
+        return None
+
     with patch.object(
         admin_app,
         "_authorize_identity",
@@ -349,6 +375,17 @@ def test_worker_cannot_list_all_projects():
             identity("WORKER"),
             None,
         ),
+    ), patch.object(
+        admin_app,
+        "_list_projects",
+        return_value=[
+            assigned,
+            hidden,
+        ],
+    ), patch.object(
+        admin_app,
+        "_project_member_record",
+        side_effect=membership,
     ):
         response = admin_app.handler(
             event(
@@ -358,7 +395,17 @@ def test_worker_cannot_list_all_projects():
             None,
         )
 
-    assert response["statusCode"] == 403
+    assert response["statusCode"] == 200
+
+    result = body(response)
+
+    assert result["count"] == 1
+
+    assert (
+        result["items"][0]["projectId"]
+        == "KAS-001"
+    )
+
 
 def test_project_color_defaults_by_project_id():
     first = project()
@@ -638,3 +685,875 @@ def test_project_color_update_records_audit():
         activity_args[4]["projectColor"]
         == "TEAL"
     )
+
+
+def test_archived_project_visible_to_historical_worker():
+    archived = project()
+    archived["status"] = "ARCHIVED"
+
+    membership = {
+        "recordType":
+            "PROJECT_MEMBERSHIP",
+        "projectId":
+            "KAS-001",
+        "userId":
+            "user-1",
+        "projectRole":
+            "PRODUCTION",
+        "membershipStatus":
+            "UNASSIGNED",
+    }
+
+    with patch.object(
+        admin_app,
+        "_authorize_identity",
+        return_value=(
+            identity("WORKER"),
+            None,
+        ),
+    ), patch.object(
+        admin_app,
+        "_project_record",
+        return_value=archived,
+    ), patch.object(
+        admin_app,
+        "_project_member_record",
+        return_value=membership,
+    ):
+        response = admin_app.handler(
+            event(
+                "GET",
+                "/v1/admin/projects/KAS-001",
+                project_id="KAS-001",
+            ),
+            None,
+        )
+
+    assert response["statusCode"] == 200
+
+
+def test_unassigned_worker_cannot_view_active_project():
+    membership = {
+        "recordType":
+            "PROJECT_MEMBERSHIP",
+        "projectId":
+            "KAS-001",
+        "userId":
+            "user-1",
+        "projectRole":
+            "PRODUCTION",
+        "membershipStatus":
+            "UNASSIGNED",
+    }
+
+    with patch.object(
+        admin_app,
+        "_authorize_identity",
+        return_value=(
+            identity("WORKER"),
+            None,
+        ),
+    ), patch.object(
+        admin_app,
+        "_project_record",
+        return_value=project(),
+    ), patch.object(
+        admin_app,
+        "_project_member_record",
+        return_value=membership,
+    ):
+        response = admin_app.handler(
+            event(
+                "GET",
+                "/v1/admin/projects/KAS-001",
+                project_id="KAS-001",
+            ),
+            None,
+        )
+
+    assert response["statusCode"] == 403
+
+
+def test_project_lead_can_complete_project():
+    updated = project()
+    updated["status"] = "COMPLETED"
+
+    membership = {
+        "recordType":
+            "PROJECT_MEMBERSHIP",
+        "projectId":
+            "KAS-001",
+        "userId":
+            "user-1",
+        "projectRole":
+            "PROJECT_LEAD",
+        "membershipStatus":
+            "ACTIVE",
+    }
+
+    with patch.object(
+        admin_app,
+        "_authorize_identity",
+        return_value=(
+            identity("WORKER"),
+            None,
+        ),
+    ), patch.object(
+        admin_app,
+        "_project_record",
+        return_value=project(),
+    ), patch.object(
+        admin_app,
+        "_project_member_record",
+        return_value=membership,
+    ), patch.object(
+        admin_app,
+        "_project_open_work_summary",
+        return_value={
+            "openTasks": 0,
+            "openFollowUps": 0,
+        },
+    ), patch.object(
+        admin_app,
+        "_transition_project",
+        return_value=updated,
+    ) as transition:
+        response = admin_app.handler(
+            event(
+                "POST",
+                "/v1/admin/projects/"
+                "KAS-001/complete",
+                project_id="KAS-001",
+                payload={
+                    "note":
+                        "Event delivered.",
+                },
+            ),
+            None,
+        )
+
+    assert response["statusCode"] == 200
+
+    transition.assert_called_once()
+
+
+def test_non_lead_worker_cannot_complete_project():
+    membership = {
+        "recordType":
+            "PROJECT_MEMBERSHIP",
+        "projectId":
+            "KAS-001",
+        "userId":
+            "user-1",
+        "projectRole":
+            "PRODUCTION",
+        "membershipStatus":
+            "ACTIVE",
+    }
+
+    with patch.object(
+        admin_app,
+        "_authorize_identity",
+        return_value=(
+            identity("WORKER"),
+            None,
+        ),
+    ), patch.object(
+        admin_app,
+        "_project_record",
+        return_value=project(),
+    ), patch.object(
+        admin_app,
+        "_project_member_record",
+        return_value=membership,
+    ):
+        response = admin_app.handler(
+            event(
+                "POST",
+                "/v1/admin/projects/"
+                "KAS-001/complete",
+                project_id="KAS-001",
+            ),
+            None,
+        )
+
+    assert response["statusCode"] == 403
+
+
+def test_complete_project_blocks_open_work():
+    with patch.object(
+        admin_app,
+        "_authorize_identity",
+        return_value=(
+            identity("OWNER"),
+            None,
+        ),
+    ), patch.object(
+        admin_app,
+        "_project_record",
+        return_value=project(),
+    ), patch.object(
+        admin_app,
+        "_project_open_work_summary",
+        return_value={
+            "openTasks": 2,
+            "openFollowUps": 1,
+        },
+    ):
+        response = admin_app.handler(
+            event(
+                "POST",
+                "/v1/admin/projects/"
+                "KAS-001/complete",
+                project_id="KAS-001",
+            ),
+            None,
+        )
+
+    assert response["statusCode"] == 409
+
+    result = body(response)
+
+    assert (
+        result["error"]
+        == "open_work_remaining"
+    )
+
+    assert result["openTasks"] == 2
+    assert result["openFollowUps"] == 1
+
+
+def test_owner_can_force_complete_with_open_work():
+    updated = project()
+    updated["status"] = "COMPLETED"
+
+    with patch.object(
+        admin_app,
+        "_authorize_identity",
+        return_value=(
+            identity("OWNER"),
+            None,
+        ),
+    ), patch.object(
+        admin_app,
+        "_project_record",
+        return_value=project(),
+    ), patch.object(
+        admin_app,
+        "_project_open_work_summary",
+        return_value={
+            "openTasks": 2,
+            "openFollowUps": 1,
+        },
+    ), patch.object(
+        admin_app,
+        "_transition_project",
+        return_value=updated,
+    ) as transition:
+        response = admin_app.handler(
+            event(
+                "POST",
+                "/v1/admin/projects/"
+                "KAS-001/complete",
+                project_id="KAS-001",
+                payload={
+                    "force": True,
+                    "note":
+                        "Approved override.",
+                },
+            ),
+            None,
+        )
+
+    assert response["statusCode"] == 200
+
+    transition.assert_called_once()
+
+
+def test_cancel_requires_reason():
+    with patch.object(
+        admin_app,
+        "_authorize_identity",
+        return_value=(
+            identity("OWNER"),
+            None,
+        ),
+    ), patch.object(
+        admin_app,
+        "_project_record",
+        return_value=project(),
+    ):
+        response = admin_app.handler(
+            event(
+                "POST",
+                "/v1/admin/projects/"
+                "KAS-001/cancel",
+                project_id="KAS-001",
+            ),
+            None,
+        )
+
+    assert response["statusCode"] == 400
+
+    assert (
+        body(response)["error"]
+        == "reason_required"
+    )
+
+
+def test_worker_cannot_archive_project():
+    completed = project()
+    completed["status"] = "COMPLETED"
+
+    with patch.object(
+        admin_app,
+        "_authorize_identity",
+        return_value=(
+            identity("WORKER"),
+            None,
+        ),
+    ), patch.object(
+        admin_app,
+        "_project_record",
+        return_value=completed,
+    ):
+        response = admin_app.handler(
+            event(
+                "POST",
+                "/v1/admin/projects/"
+                "KAS-001/archive",
+                project_id="KAS-001",
+            ),
+            None,
+        )
+
+    assert response["statusCode"] == 403
+
+
+def test_lifecycle_transition_rules():
+    assert (
+        admin_app._lifecycle_target_status(
+            "ACTIVE",
+            "complete",
+        )
+        == "COMPLETED"
+    )
+
+    assert (
+        admin_app._lifecycle_target_status(
+            "ACTIVE",
+            "cancel",
+        )
+        == "CANCELLED"
+    )
+
+    assert (
+        admin_app._lifecycle_target_status(
+            "COMPLETED",
+            "reopen",
+        )
+        == "ACTIVE"
+    )
+
+    assert (
+        admin_app._lifecycle_target_status(
+            "COMPLETED",
+            "archive",
+        )
+        == "ARCHIVED"
+    )
+
+    assert (
+        admin_app._lifecycle_target_status(
+            "ARCHIVED",
+            "restore",
+            "CANCELLED",
+        )
+        == "CANCELLED"
+    )
+
+
+def test_complete_transition_is_atomic_with_audit():
+    current = project()
+
+    updated = project()
+    updated["status"] = "COMPLETED"
+    updated["completedAt"] = (
+        "2026-09-09T20:00:00+00:00"
+    )
+
+    with patch.object(
+        admin_app,
+        "_utcnow",
+        return_value=(
+            "2026-09-09T20:00:00+00:00"
+        ),
+    ), patch.object(
+        admin_app.boto3,
+        "client",
+    ) as client_factory, patch.object(
+        admin_app,
+        "_project_record",
+        return_value=updated,
+    ):
+        result = (
+            admin_app._transition_project(
+                current,
+                "complete",
+                "user-1",
+                "Delivered.",
+            )
+        )
+
+    assert result["status"] == "COMPLETED"
+
+    client_factory.assert_called_once_with(
+        "dynamodb"
+    )
+
+    transaction = (
+        client_factory.return_value
+        .transact_write_items
+        .call_args.kwargs[
+            "TransactItems"
+        ]
+    )
+
+    assert len(transaction) == 2
+    assert "Update" in transaction[0]
+    assert "Put" in transaction[1]
+
+    update = transaction[0]["Update"]
+
+    assert (
+        update[
+            "ExpressionAttributeValues"
+        ][":new_status"]["S"]
+        == "COMPLETED"
+    )
+
+    activity = (
+        transaction[1]["Put"]["Item"]
+    )
+
+    assert (
+        activity["recordType"]["S"]
+        == "ACTIVITY"
+    )
+
+    assert (
+        activity["activityType"]["S"]
+        == "PROJECT_COMPLETED"
+    )
+
+
+
+def test_public_project_exposes_lifecycle_metadata():
+    item = project()
+
+    item.update({
+        "status":
+            "COMPLETED",
+        "completedAt":
+            "2026-09-10T00:00:00+00:00",
+        "completedBy":
+            "user-1",
+        "completionNote":
+            "Done.",
+    })
+
+    result = admin_app._public_project(
+        item
+    )
+
+    assert result["status"] == "COMPLETED"
+
+    assert (
+        result["completedAt"]
+        == "2026-09-10T00:00:00+00:00"
+    )
+
+    assert result["completedBy"] == "user-1"
+    assert result["completionNote"] == "Done."
+
+def test_project_lead_cannot_force_complete_open_work():
+    membership = {
+        "recordType":
+            "PROJECT_MEMBERSHIP",
+        "projectId":
+            "KAS-001",
+        "userId":
+            "user-1",
+        "projectRole":
+            "PROJECT_LEAD",
+        "membershipStatus":
+            "ACTIVE",
+    }
+
+    with patch.object(
+        admin_app,
+        "_authorize_identity",
+        return_value=(
+            identity("WORKER"),
+            None,
+        ),
+    ), patch.object(
+        admin_app,
+        "_project_record",
+        return_value=project(),
+    ), patch.object(
+        admin_app,
+        "_project_member_record",
+        return_value=membership,
+    ), patch.object(
+        admin_app,
+        "_project_open_work_summary",
+        return_value={
+            "openTasks": 1,
+            "openFollowUps": 1,
+        },
+    ):
+        response = admin_app.handler(
+            event(
+                "POST",
+                "/v1/admin/projects/"
+                "KAS-001/complete",
+                project_id="KAS-001",
+                payload={
+                    "force": True,
+                    "note":
+                        "Trying override.",
+                },
+            ),
+            None,
+        )
+
+    assert response["statusCode"] == 403
+
+    assert (
+        body(response)["error"]
+        == "project_force_complete_forbidden"
+    )
+
+def test_assigned_worker_can_read_project_children():
+    membership = {
+        "recordType":
+            "PROJECT_MEMBERSHIP",
+        "projectId":
+            "KAS-001",
+        "userId":
+            "user-1",
+        "projectRole":
+            "PRODUCTION",
+        "membershipStatus":
+            "ACTIVE",
+    }
+
+    routes = (
+        (
+            "/notes",
+            "_handle_list_project_notes",
+        ),
+        (
+            "/follow-ups",
+            "_handle_list_project_follow_ups",
+        ),
+        (
+            "/activity",
+            "_handle_list_project_activity",
+        ),
+        (
+            "/tasks",
+            "_handle_list_project_tasks",
+        ),
+        (
+            "/members",
+            "_handle_list_project_members",
+        ),
+    )
+
+    for suffix, handler_name in routes:
+        with patch.object(
+            admin_app,
+            "_authorize_identity",
+            return_value=(
+                identity("WORKER"),
+                None,
+            ),
+        ), patch.object(
+            admin_app,
+            "_project_record",
+            return_value=project(),
+        ), patch.object(
+            admin_app,
+            "_project_member_record",
+            return_value=membership,
+        ), patch.object(
+            admin_app,
+            handler_name,
+            return_value=
+                admin_app._response(
+                    200,
+                    {"ok": True},
+                ),
+        ):
+            response = admin_app.handler(
+                event(
+                    "GET",
+                    (
+                        "/v1/admin/projects/"
+                        "KAS-001"
+                        f"{suffix}"
+                    ),
+                    project_id="KAS-001",
+                ),
+                None,
+            )
+
+        assert response["statusCode"] == 200
+
+
+def test_unassigned_worker_cannot_read_active_children():
+    membership = {
+        "recordType":
+            "PROJECT_MEMBERSHIP",
+        "projectId":
+            "KAS-001",
+        "userId":
+            "user-1",
+        "projectRole":
+            "PRODUCTION",
+        "membershipStatus":
+            "UNASSIGNED",
+    }
+
+    with patch.object(
+        admin_app,
+        "_authorize_identity",
+        return_value=(
+            identity("WORKER"),
+            None,
+        ),
+    ), patch.object(
+        admin_app,
+        "_project_record",
+        return_value=project(),
+    ), patch.object(
+        admin_app,
+        "_project_member_record",
+        return_value=membership,
+    ), patch.object(
+        admin_app,
+        "_handle_list_project_activity",
+    ) as activity_handler:
+        response = admin_app.handler(
+            event(
+                "GET",
+                (
+                    "/v1/admin/projects/"
+                    "KAS-001/activity"
+                ),
+                project_id="KAS-001",
+            ),
+            None,
+        )
+
+    assert response["statusCode"] == 403
+
+    activity_handler.assert_not_called()
+
+
+def test_historical_worker_can_read_archived_children():
+    archived = project()
+    archived["status"] = "ARCHIVED"
+
+    membership = {
+        "recordType":
+            "PROJECT_MEMBERSHIP",
+        "projectId":
+            "KAS-001",
+        "userId":
+            "user-1",
+        "projectRole":
+            "PRODUCTION",
+        "membershipStatus":
+            "UNASSIGNED",
+    }
+
+    with patch.object(
+        admin_app,
+        "_authorize_identity",
+        return_value=(
+            identity("WORKER"),
+            None,
+        ),
+    ), patch.object(
+        admin_app,
+        "_project_record",
+        return_value=archived,
+    ), patch.object(
+        admin_app,
+        "_project_member_record",
+        return_value=membership,
+    ), patch.object(
+        admin_app,
+        "_handle_list_project_activity",
+        return_value=
+            admin_app._response(
+                200,
+                {"items": []},
+            ),
+    ):
+        response = admin_app.handler(
+            event(
+                "GET",
+                (
+                    "/v1/admin/projects/"
+                    "KAS-001/activity"
+                ),
+                project_id="KAS-001",
+            ),
+            None,
+        )
+
+    assert response["statusCode"] == 200
+
+def test_force_complete_open_work_requires_note():
+    with patch.object(
+        admin_app,
+        "_authorize_identity",
+        return_value=(
+            identity("OWNER"),
+            None,
+        ),
+    ), patch.object(
+        admin_app,
+        "_project_record",
+        return_value=project(),
+    ), patch.object(
+        admin_app,
+        "_project_open_work_summary",
+        return_value={
+            "openTasks": 1,
+            "openFollowUps": 0,
+        },
+    ), patch.object(
+        admin_app,
+        "_transition_project",
+    ) as transition:
+        response = admin_app.handler(
+            event(
+                "POST",
+                "/v1/admin/projects/"
+                "KAS-001/complete",
+                project_id="KAS-001",
+                payload={
+                    "force": True,
+                },
+            ),
+            None,
+        )
+
+    assert response["statusCode"] == 400
+
+    assert (
+        body(response)["error"]
+        == "completion_note_required"
+    )
+
+    transition.assert_not_called()
+
+
+def test_completed_project_with_open_work_cannot_archive():
+    completed = project()
+    completed["status"] = "COMPLETED"
+
+    with patch.object(
+        admin_app,
+        "_authorize_identity",
+        return_value=(
+            identity("OWNER"),
+            None,
+        ),
+    ), patch.object(
+        admin_app,
+        "_project_record",
+        return_value=completed,
+    ), patch.object(
+        admin_app,
+        "_project_open_work_summary",
+        return_value={
+            "openTasks": 1,
+            "openFollowUps": 1,
+        },
+    ), patch.object(
+        admin_app,
+        "_transition_project",
+    ) as transition:
+        response = admin_app.handler(
+            event(
+                "POST",
+                "/v1/admin/projects/"
+                "KAS-001/archive",
+                project_id="KAS-001",
+            ),
+            None,
+        )
+
+    assert response["statusCode"] == 409
+
+    assert (
+        body(response)["error"]
+        == "open_work_remaining"
+    )
+
+    transition.assert_not_called()
+
+
+def test_force_archive_open_work_requires_note():
+    completed = project()
+    completed["status"] = "COMPLETED"
+
+    with patch.object(
+        admin_app,
+        "_authorize_identity",
+        return_value=(
+            identity("MANAGER"),
+            None,
+        ),
+    ), patch.object(
+        admin_app,
+        "_project_record",
+        return_value=completed,
+    ), patch.object(
+        admin_app,
+        "_project_open_work_summary",
+        return_value={
+            "openTasks": 1,
+            "openFollowUps": 0,
+        },
+    ), patch.object(
+        admin_app,
+        "_transition_project",
+    ) as transition:
+        response = admin_app.handler(
+            event(
+                "POST",
+                "/v1/admin/projects/"
+                "KAS-001/archive",
+                project_id="KAS-001",
+                payload={
+                    "force": True,
+                },
+            ),
+            None,
+        )
+
+    assert response["statusCode"] == 400
+
+    assert (
+        body(response)["error"]
+        == "archive_note_required"
+    )
+
+    transition.assert_not_called()

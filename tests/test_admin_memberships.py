@@ -167,7 +167,15 @@ def test_manager_can_list_project_members():
     assert body(response)["count"] == 1
 
 
-def test_worker_cannot_list_project_members():
+def test_worker_project_member_read_enforces_project_access():
+    denied = admin_app._response(
+        403,
+        {
+            "error":
+                "project_access_required"
+        },
+    )
+
     with patch.object(
         admin_app,
         "_authorize_identity",
@@ -175,7 +183,14 @@ def test_worker_cannot_list_project_members():
             identity("WORKER"),
             None,
         ),
-    ):
+    ), patch.object(
+        admin_app,
+        "_project_read_access_error",
+        return_value=denied,
+    ) as access_check, patch.object(
+        admin_app,
+        "_handle_list_project_members",
+    ) as list_members:
         response = admin_app.handler(
             event(
                 "GET",
@@ -186,6 +201,10 @@ def test_worker_cannot_list_project_members():
         )
 
     assert response["statusCode"] == 403
+
+    access_check.assert_called_once()
+
+    list_members.assert_not_called()
 
 
 def test_invalid_project_role_rejected():
@@ -354,7 +373,7 @@ def test_manager_can_unassign_member():
     )
 
 
-def test_unassign_does_not_delete_history():
+def test_unassign_preserves_history_index():
     class FakeTable:
         def __init__(self):
             self.updated = False
@@ -372,8 +391,13 @@ def test_unassign_does_not_delete_history():
             ]
 
             assert (
-                "REMOVE GSI2PK, GSI2SK"
-                in expression
+                "REMOVE GSI2PK"
+                not in expression
+            )
+
+            assert (
+                "REMOVE GSI2SK"
+                not in expression
             )
 
             item = membership(
