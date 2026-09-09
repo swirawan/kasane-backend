@@ -15,6 +15,7 @@ from urllib import parse, request
 
 import boto3
 from botocore.exceptions import BotoCoreError, ClientError
+from boto3.dynamodb.types import TypeSerializer
 
 LOGGER = logging.getLogger()
 LOGGER.setLevel(os.getenv("LOG_LEVEL", "INFO"))
@@ -34,6 +35,7 @@ ALLOWED_ORIGINS = {x.strip() for x in os.environ.get("ALLOWED_ORIGINS", "").spli
 LEAD_RETENTION_DAYS = int(os.environ.get("LEAD_RETENTION_DAYS", "730"))
 
 _ddb = None
+_ddb_client_instance = None
 _ses = None
 _secrets = None
 _turnstile_secret_cache: str | None = None
@@ -58,6 +60,18 @@ def _ddb_table():
     if _ddb is None:
         _ddb = boto3.resource("dynamodb").Table(TABLE_NAME)
     return _ddb
+
+
+def _ddb_client():
+    global _ddb_client_instance
+    if _ddb_client_instance is None:
+        _ddb_client_instance = boto3.client("dynamodb")
+    return _ddb_client_instance
+
+
+def _serialize_item(item: dict[str, Any]) -> dict[str, Any]:
+    serializer = TypeSerializer()
+    return {key: serializer.serialize(value) for key, value in item.items()}
 
 
 def _ses_client():
@@ -247,29 +261,322 @@ def _reference() -> str:
     return f"KAS-{date_part}-{suffix}"
 
 
-def _store_lead(lead: dict[str, Any]) -> str:
+_IDEMPOTENCY_DIGEST_FIELDS = (
+    "language",
+    "name",
+    "phone",
+    "email",
+    "preferredContact",
+    "eventType",
+    "product",
+    "package",
+    "direction",
+    "city",
+    "date",
+    "guests",
+    "message",
+)
+
+
+class IdempotencyConflict(Exception):
+    """A submissionId was reused for a materially different brief."""
+
+
+def _payload_digest(lead: dict[str, Any]) -> str:
+    """Return a stable digest of the meaningful client brief fields.
+
+    Transport/security fields such as CAPTCHA tokens, browser metadata,
+    source page, request fingerprint, and server timestamps are excluded.
+    """
+    payload = {
+        key: str(lead.get(key) or "")
+        for key in _IDEMPOTENCY_DIGEST_FIELDS
+    }
+
+    encoded = json.dumps(
+        payload,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _idempotency_reference(submission_id: str) -> str:
+    submission_hash = hashlib.sha256(
+        submission_id.encode("utf-8")
+    ).hexdigest()
+
+    return f"IDEMPOTENCY#{submission_hash}"
+
+
+def _existing_submission_reference(
+    lead: dict[str, Any],
+) -> str | None:
+    """Return the original KAS reference for an exact duplicate.
+
+    Raises:
+        IdempotencyConflict:
+            The same submissionId was previously used for a
+            materially different brief.
+    """
+    submission_id = str(
+        lead.get("submissionId") or ""
+    ).strip()
+
+    if not submission_id:
+        return None
+
     table = _ddb_table()
+
+    marker_reference = _idempotency_reference(
+        submission_id
+    )
+
+    marker = table.get_item(
+        Key={"reference": marker_reference},
+        ConsistentRead=True,
+    ).get("Item")
+
+    if not marker or not marker.get("targetReference"):
+        return None
+
+    target_reference = str(
+        marker["targetReference"]
+    )
+
+    current_digest = _payload_digest(lead)
+
+    stored_digest = str(
+        marker.get("payloadDigest") or ""
+    ).strip()
+
+    # Compatibility with markers created before payloadDigest existed.
+    # Read the original stored lead and derive its digest.
+    if not stored_digest:
+        target_item = table.get_item(
+            Key={"reference": target_reference},
+            ConsistentRead=True,
+        ).get("Item")
+
+        if not target_item:
+            raise RuntimeError(
+                "idempotency_target_missing"
+            )
+
+        stored_digest = _payload_digest(
+            target_item
+        )
+
+    if not secrets.compare_digest(
+        stored_digest,
+        current_digest,
+    ):
+        raise IdempotencyConflict(
+            "submission_id_reused_with_different_payload"
+        )
+
+    return target_reference
+
+
+def _store_lead(
+    lead: dict[str, Any],
+) -> tuple[str, bool]:
+    """Store a lead exactly once when submissionId is supplied.
+
+    Returns:
+        (reference, created)
+
+        created=False means this exact submissionId and
+        brief payload were already accepted earlier.
+    """
+    table = _ddb_table()
+
+    submission_id = str(
+        lead.get("submissionId") or ""
+    ).strip()
+
+    # Compatibility path for clients that do not yet send submissionId.
+    if not submission_id:
+        for _ in range(4):
+            reference = _reference()
+            now = int(time.time())
+
+            item = {
+                **lead,
+                "reference": reference,
+                "recordType": "EVENT_BRIEF",
+                "stage": STAGE,
+                "createdAt": datetime.now(
+                    timezone.utc
+                ).isoformat(),
+                "expiresAt": (
+                    now
+                    + LEAD_RETENTION_DAYS * 86400
+                ),
+            }
+
+            item.pop("captchaToken", None)
+            item.pop("website", None)
+
+            try:
+                table.put_item(
+                    Item=item,
+                    ConditionExpression=(
+                        "attribute_not_exists(#ref)"
+                    ),
+                    ExpressionAttributeNames={
+                        "#ref": "reference"
+                    },
+                )
+
+                return reference, True
+
+            except ClientError as exc:
+                if (
+                    exc.response
+                    .get("Error", {})
+                    .get("Code")
+                    != "ConditionalCheckFailedException"
+                ):
+                    raise
+
+        raise RuntimeError(
+            "reference_collision"
+        )
+
+    idempotency_reference = (
+        _idempotency_reference(
+            submission_id
+        )
+    )
+
+    payload_digest = _payload_digest(
+        lead
+    )
+
+    # Keep _store_lead independently safe even when called somewhere
+    # other than the HTTP handler.
+    existing_reference = (
+        _existing_submission_reference(
+            lead
+        )
+    )
+
+    if existing_reference:
+        return existing_reference, False
+
     for _ in range(4):
         reference = _reference()
         now = int(time.time())
-        item = {
+
+        created_at = datetime.now(
+            timezone.utc
+        ).isoformat()
+
+        expires_at = (
+            now
+            + LEAD_RETENTION_DAYS * 86400
+        )
+
+        lead_item = {
             **lead,
             "reference": reference,
             "recordType": "EVENT_BRIEF",
             "stage": STAGE,
-            "createdAt": datetime.now(timezone.utc).isoformat(),
-            "expiresAt": now + LEAD_RETENTION_DAYS * 86400,
+            "createdAt": created_at,
+            "expiresAt": expires_at,
         }
-        # Never persist CAPTCHA response or honeypot values.
-        item.pop("captchaToken", None)
-        item.pop("website", None)
+
+        lead_item.pop(
+            "captchaToken",
+            None,
+        )
+
+        lead_item.pop(
+            "website",
+            None,
+        )
+
+        marker_item = {
+            "reference": idempotency_reference,
+            "recordType": "IDEMPOTENCY",
+            "targetReference": reference,
+            "submissionId": submission_id,
+            "payloadDigest": payload_digest,
+            "stage": STAGE,
+            "createdAt": created_at,
+            "expiresAt": expires_at,
+        }
+
         try:
-            table.put_item(Item=item, ConditionExpression="attribute_not_exists(reference)")
-            return reference
+            _ddb_client().transact_write_items(
+                TransactItems=[
+                    {
+                        "Put": {
+                            "TableName": TABLE_NAME,
+                            "Item": _serialize_item(
+                                marker_item
+                            ),
+                            "ConditionExpression": (
+                                "attribute_not_exists(#ref)"
+                            ),
+                            "ExpressionAttributeNames": {
+                                "#ref": "reference"
+                            },
+                        }
+                    },
+                    {
+                        "Put": {
+                            "TableName": TABLE_NAME,
+                            "Item": _serialize_item(
+                                lead_item
+                            ),
+                            "ConditionExpression": (
+                                "attribute_not_exists(#ref)"
+                            ),
+                            "ExpressionAttributeNames": {
+                                "#ref": "reference"
+                            },
+                        }
+                    },
+                ]
+            )
+
+            return reference, True
+
         except ClientError as exc:
-            if exc.response.get("Error", {}).get("Code") != "ConditionalCheckFailedException":
+            code = (
+                exc.response
+                .get("Error", {})
+                .get("Code")
+            )
+
+            if code != "TransactionCanceledException":
                 raise
-    raise RuntimeError("reference_collision")
+
+            # Another request may have won the same
+            # submissionId race. Re-read and verify that
+            # its payload is identical before returning it.
+            existing_reference = (
+                _existing_submission_reference(
+                    lead
+                )
+            )
+
+            if existing_reference:
+                return (
+                    existing_reference,
+                    False,
+                )
+
+            # Otherwise retry. The generated human-readable
+            # KAS reference may have collided.
+
+    raise RuntimeError(
+        "idempotency_transaction_failed"
+    )
 
 
 def _lead_email_text(reference: str, lead: dict[str, Any]) -> str:
@@ -379,6 +686,59 @@ def handler(event: dict[str, Any], context: Any) -> dict[str, Any]:
     if errors:
         return _response(400, {"error": "validation_failed", "fields": errors}, origin)
 
+    # Idempotency must be checked BEFORE Turnstile because
+    # Cloudflare CAPTCHA tokens are single-use. A legitimate retry
+    # after an accepted request must be able to recover the original
+    # reference without attempting to consume the CAPTCHA again.
+    try:
+        existing_reference = _existing_submission_reference(
+            normalized
+        )
+    except IdempotencyConflict:
+        return _response(
+            409,
+            {
+                "error": "submission_conflict",
+                "message": (
+                    "This submission was already used for a "
+                    "different brief. Please start a new brief."
+                ),
+            },
+            origin,
+        )
+    except (BotoCoreError, ClientError, RuntimeError) as exc:
+        LOGGER.exception(
+            "Idempotency lookup failed type=%s",
+            type(exc).__name__,
+        )
+        return _response(
+            503,
+            {
+                "error": "temporarily_unavailable",
+                "message": (
+                    "We could not verify the brief right now."
+                ),
+            },
+            origin,
+        )
+
+    if existing_reference:
+        LOGGER.info(
+            "Duplicate brief recovered reference=%s",
+            existing_reference,
+        )
+
+        return _response(
+            201,
+            {
+                "ok": True,
+                "reference": existing_reference,
+                "created": False,
+                "notificationSent": False,
+            },
+            origin,
+        )
+
     source_ip = (((event.get("requestContext") or {}).get("http") or {}).get("sourceIp") or "").strip()
     captcha_ok, captcha_reason = _verify_turnstile(normalized.get("captchaToken", ""), source_ip)
     if not captcha_ok:
@@ -392,17 +752,45 @@ def handler(event: dict[str, Any], context: Any) -> dict[str, Any]:
     normalized.pop("submittedAt", None)  # server timestamp is authoritative
 
     try:
-        reference = _store_lead(normalized)
+        reference, created = _store_lead(normalized)
+    except IdempotencyConflict:
+        return _response(
+            409,
+            {
+                "error": "submission_conflict",
+                "message": (
+                    "This submission was already used for a "
+                    "different brief. Please start a new brief."
+                ),
+            },
+            origin,
+        )
     except (BotoCoreError, ClientError, RuntimeError) as exc:
         LOGGER.exception("Lead persistence failed type=%s", type(exc).__name__)
         return _response(503, {"error": "temporarily_unavailable", "message": "We could not save the brief right now."}, origin)
 
     notification_sent = False
     try:
-        notification_sent = _send_notification(reference, normalized)
+        if created:
+            notification_sent = _send_notification(reference, normalized)
     except (BotoCoreError, ClientError) as exc:
         # The lead is already safely stored, so a notification outage should not make the visitor resubmit.
         LOGGER.exception("SES notification failed reference=%s type=%s", reference, type(exc).__name__)
 
-    LOGGER.info("Lead accepted reference=%s eventType=%s notification=%s", reference, normalized["eventType"], notification_sent)
-    return _response(201, {"ok": True, "reference": reference, "notificationSent": notification_sent}, origin)
+    LOGGER.info(
+        "Lead accepted reference=%s eventType=%s created=%s notification=%s",
+        reference,
+        normalized["eventType"],
+        created,
+        notification_sent,
+    )
+    return _response(
+        201,
+        {
+            "ok": True,
+            "reference": reference,
+            "created": created,
+            "notificationSent": notification_sent,
+        },
+        origin,
+    )

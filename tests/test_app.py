@@ -43,6 +43,7 @@ def good_payload():
         "guests": "300",
         "message": "We want a calm evening wedding with full planning support.",
         "page": "https://swirawan.github.io/kasane-collective/",
+        "submissionId": "test-submission-001",
         "captchaToken": "",
         "website": "",
     }
@@ -69,10 +70,32 @@ def test_rejects_bad_origin():
 
 
 def test_accepts_and_returns_reference_when_storage_succeeds():
-    with patch.object(app, "_store_lead", return_value="KAS-260908-ABC123"), patch.object(app, "_send_notification", return_value=False):
-        response = app.handler(event(good_payload()), None)
+    with (
+        patch.object(
+            app,
+            "_existing_submission_reference",
+            return_value=None,
+        ),
+        patch.object(
+            app,
+            "_store_lead",
+            return_value=("KAS-260908-ABC123", True),
+        ),
+        patch.object(
+            app,
+            "_send_notification",
+            return_value=False,
+        ),
+    ):
+        response = app.handler(
+            event(good_payload()),
+            None,
+        )
+
     assert response["statusCode"] == 201
+
     body = json.loads(response["body"])
+
     assert body["reference"] == "KAS-260908-ABC123"
 
 
@@ -83,3 +106,152 @@ def test_honeypot_does_not_store():
         response = app.handler(event(payload), None)
     assert response["statusCode"] == 201
     store.assert_not_called()
+
+
+
+def test_duplicate_submission_does_not_send_second_notification():
+    payload = good_payload()
+
+    with (
+        patch.object(
+            app,
+            "_existing_submission_reference",
+            return_value="KAS-260908-SAME01",
+        ),
+        patch.object(
+            app,
+            "_verify_turnstile",
+        ) as verify_turnstile,
+        patch.object(
+            app,
+            "_store_lead",
+        ) as store,
+        patch.object(
+            app,
+            "_send_notification",
+        ) as send_notification,
+    ):
+        response = app.handler(
+            event(payload),
+            None,
+        )
+
+    assert response["statusCode"] == 201
+
+    body = json.loads(response["body"])
+
+    assert body["reference"] == "KAS-260908-SAME01"
+    assert body["created"] is False
+    assert body["notificationSent"] is False
+
+    verify_turnstile.assert_not_called()
+    store.assert_not_called()
+    send_notification.assert_not_called()
+
+
+def test_new_submission_reports_created_true():
+    payload = good_payload()
+
+    with (
+        patch.object(
+            app,
+            "_existing_submission_reference",
+            return_value=None,
+        ),
+        patch.object(
+            app,
+            "_store_lead",
+            return_value=("KAS-260908-NEW001", True),
+        ),
+        patch.object(
+            app,
+            "_send_notification",
+            return_value=False,
+        ),
+    ):
+        response = app.handler(
+            event(payload),
+            None,
+        )
+
+    body = json.loads(response["body"])
+
+    assert body["created"] is True
+
+def test_submission_id_reused_for_different_payload_returns_409_before_captcha():
+    payload = good_payload()
+
+    with (
+        patch.object(
+            app,
+            "_existing_submission_reference",
+            side_effect=app.IdempotencyConflict(
+                "submission_id_reused_with_different_payload"
+            ),
+        ),
+        patch.object(
+            app,
+            "_verify_turnstile",
+        ) as verify_turnstile,
+        patch.object(
+            app,
+            "_store_lead",
+        ) as store,
+    ):
+        response = app.handler(
+            event(payload),
+            None,
+        )
+
+    assert response["statusCode"] == 409
+
+    body = json.loads(response["body"])
+
+    assert body["error"] == "submission_conflict"
+
+    verify_turnstile.assert_not_called()
+    store.assert_not_called()
+
+
+def test_payload_digest_ignores_captcha_but_detects_brief_change():
+    first = good_payload()
+
+    normalized_first, errors = (
+        app._validate_and_normalize(first)
+    )
+
+    assert not errors
+
+    digest_first = app._payload_digest(
+        normalized_first
+    )
+
+    retry = good_payload()
+    retry["captchaToken"] = "different-token"
+
+    normalized_retry, errors = (
+        app._validate_and_normalize(retry)
+    )
+
+    assert not errors
+
+    assert (
+        app._payload_digest(normalized_retry)
+        == digest_first
+    )
+
+    changed = good_payload()
+    changed["message"] = (
+        "This is a materially different event brief."
+    )
+
+    normalized_changed, errors = (
+        app._validate_and_normalize(changed)
+    )
+
+    assert not errors
+
+    assert (
+        app._payload_digest(normalized_changed)
+        != digest_first
+    )

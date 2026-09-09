@@ -68,7 +68,7 @@ Resources:
         ThrottlingBurstLimit: 10
       AccessLogSettings:
         DestinationArn: !GetAtt ApiAccessLogs.Arn
-        Format: '{"requestId":"$context.requestId","routeKey":"$context.routeKey","status":"$context.status","responseLength":"$context.responseLength","ip":"$context.identity.sourceIp"}'
+        Format: '{"requestId":"$context.requestId","routeKey":"$context.routeKey","status":"$context.status","responseLength":"$context.responseLength"}'
 
   ApiAccessLogs:
     Type: AWS::Logs::LogGroup
@@ -97,6 +97,9 @@ Resources:
         - DynamoDBCrudPolicy:
             TableName: !Ref LeadsTable
         - Statement:
+            - Effect: Allow
+              Action: dynamodb:TransactWriteItems
+              Resource: !GetAtt LeadsTable.Arn
             - Effect: Allow
               Action: secretsmanager:GetSecretValue
               Resource: !Ref TurnstileSecret
