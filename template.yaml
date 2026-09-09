@@ -41,6 +41,11 @@ Parameters:
     MinValue: 30
     MaxValue: 3650
 
+  AdminAllowedOrigins:
+    Type: CommaDelimitedList
+    Default: http://localhost:5173,https://swirawan.github.io
+    Description: Origins allowed to call the KASANE Admin API.
+
 Globals:
   Function:
     Runtime: python3.13
@@ -140,6 +145,258 @@ Resources:
         AttributeName: expiresAt
         Enabled: true
 
+  # ========================================================
+  # PHASE 6 — KASANE OPERATIONS PLATFORM
+  # ========================================================
+
+  AdminApiAccessLogs:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      RetentionInDays: 30
+
+  AdminApi:
+    Type: AWS::Serverless::HttpApi
+    Properties:
+      StageName: !Ref StageName
+
+      CorsConfiguration:
+        AllowOrigins: !Ref AdminAllowedOrigins
+        AllowMethods:
+          - GET
+          - OPTIONS
+        AllowHeaders:
+          - authorization
+          - content-type
+        MaxAge: 600
+
+      DefaultRouteSettings:
+        ThrottlingRateLimit: 20
+        ThrottlingBurstLimit: 40
+
+      AccessLogSettings:
+        DestinationArn: !GetAtt AdminApiAccessLogs.Arn
+        Format: '{"requestId":"$context.requestId","routeKey":"$context.routeKey","status":"$context.status","responseLength":"$context.responseLength"}'
+
+      Auth:
+        DefaultAuthorizer: StaffJwtAuthorizer
+
+        Authorizers:
+          StaffJwtAuthorizer:
+            IdentitySource: $request.header.Authorization
+
+            JwtConfiguration:
+              issuer: !Sub https://cognito-idp.${AWS::Region}.${AWS::URLSuffix}/${StaffUserPool}
+
+              audience:
+                - !Ref StaffUserPoolClient
+
+
+  StaffUserPool:
+    Type: AWS::Cognito::UserPool
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+
+    Properties:
+      UserPoolName: !Sub kasane-staff-${StageName}
+
+      UsernameAttributes:
+        - email
+
+      AutoVerifiedAttributes:
+        - email
+
+      AdminCreateUserConfig:
+        AllowAdminCreateUserOnly: true
+
+      AccountRecoverySetting:
+        RecoveryMechanisms:
+          - Name: verified_email
+            Priority: 1
+
+      Policies:
+        PasswordPolicy:
+          MinimumLength: 12
+          RequireLowercase: true
+          RequireUppercase: true
+          RequireNumbers: true
+          RequireSymbols: true
+          TemporaryPasswordValidityDays: 3
+
+      MfaConfiguration: OPTIONAL
+
+      EnabledMfas:
+        - SOFTWARE_TOKEN_MFA
+
+      UserAttributeUpdateSettings:
+        AttributesRequireVerificationBeforeUpdate:
+          - email
+
+
+  StaffUserPoolClient:
+    Type: AWS::Cognito::UserPoolClient
+
+    Properties:
+      UserPoolId: !Ref StaffUserPool
+      ClientName: !Sub kasane-admin-${StageName}
+
+      GenerateSecret: false
+      PreventUserExistenceErrors: ENABLED
+      EnableTokenRevocation: true
+
+      ExplicitAuthFlows:
+        - ALLOW_USER_SRP_AUTH
+        - ALLOW_USER_PASSWORD_AUTH
+        - ALLOW_REFRESH_TOKEN_AUTH
+
+      AccessTokenValidity: 60
+      IdTokenValidity: 60
+      RefreshTokenValidity: 30
+
+      TokenValidityUnits:
+        AccessToken: minutes
+        IdToken: minutes
+        RefreshToken: days
+
+
+  StaffOwnerGroup:
+    Type: AWS::Cognito::UserPoolGroup
+
+    Properties:
+      UserPoolId: !Ref StaffUserPool
+      GroupName: OWNER
+      Description: KASANE owner with full platform authority.
+      Precedence: 0
+
+
+  StaffManagerGroup:
+    Type: AWS::Cognito::UserPoolGroup
+
+    Properties:
+      UserPoolId: !Ref StaffUserPool
+      GroupName: MANAGER
+      Description: KASANE operations manager.
+      Precedence: 10
+
+
+  StaffWorkerGroup:
+    Type: AWS::Cognito::UserPoolGroup
+
+    Properties:
+      UserPoolId: !Ref StaffUserPool
+      GroupName: WORKER
+      Description: KASANE staff member. Project authority is assigned separately.
+      Precedence: 20
+
+
+  OpsTable:
+    Type: AWS::DynamoDB::Table
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+
+    Properties:
+      TableName: !Sub kasane-ops-${StageName}
+      BillingMode: PAY_PER_REQUEST
+
+      AttributeDefinitions:
+        - AttributeName: PK
+          AttributeType: S
+
+        - AttributeName: SK
+          AttributeType: S
+
+        - AttributeName: GSI1PK
+          AttributeType: S
+
+        - AttributeName: GSI1SK
+          AttributeType: S
+
+        - AttributeName: GSI2PK
+          AttributeType: S
+
+        - AttributeName: GSI2SK
+          AttributeType: S
+
+        - AttributeName: GSI3PK
+          AttributeType: S
+
+        - AttributeName: GSI3SK
+          AttributeType: S
+
+      KeySchema:
+        - AttributeName: PK
+          KeyType: HASH
+
+        - AttributeName: SK
+          KeyType: RANGE
+
+      GlobalSecondaryIndexes:
+        - IndexName: GSI1
+          KeySchema:
+            - AttributeName: GSI1PK
+              KeyType: HASH
+            - AttributeName: GSI1SK
+              KeyType: RANGE
+          Projection:
+            ProjectionType: ALL
+
+        - IndexName: GSI2
+          KeySchema:
+            - AttributeName: GSI2PK
+              KeyType: HASH
+            - AttributeName: GSI2SK
+              KeyType: RANGE
+          Projection:
+            ProjectionType: ALL
+
+        - IndexName: GSI3
+          KeySchema:
+            - AttributeName: GSI3PK
+              KeyType: HASH
+            - AttributeName: GSI3SK
+              KeyType: RANGE
+          Projection:
+            ProjectionType: ALL
+
+      SSESpecification:
+        SSEEnabled: true
+
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+
+      TimeToLiveSpecification:
+        AttributeName: ttlExpiresAt
+        Enabled: true
+
+
+  AdminFunction:
+    Type: AWS::Serverless::Function
+
+    Properties:
+      CodeUri: admin/
+      Handler: app.handler
+      Description: KASANE authenticated staff API.
+      Timeout: 5
+
+      Environment:
+        Variables:
+          OPS_TABLE_NAME: !Ref OpsTable
+          STAFF_USER_POOL_ID: !Ref StaffUserPool
+          STAGE: !Ref StageName
+
+      Policies:
+        - DynamoDBReadPolicy:
+            TableName: !Ref OpsTable
+
+      Events:
+        CurrentStaffMember:
+          Type: HttpApi
+
+          Properties:
+            ApiId: !Ref AdminApi
+            Path: /v1/admin/me
+            Method: GET
+
+
   TurnstileSecret:
     Type: AWS::SecretsManager::Secret
     Properties:
@@ -157,5 +414,25 @@ Outputs:
     Value: !Sub https://${BriefApi}.execute-api.${AWS::Region}.${AWS::URLSuffix}/${StageName}/health
   LeadsTableName:
     Value: !Ref LeadsTable
+  AdminApiBaseUrl:
+    Description: KASANE staff Admin API base URL
+    Value: !Sub https://${AdminApi}.execute-api.${AWS::Region}.${AWS::URLSuffix}/${StageName}
+
+  AdminMeEndpoint:
+    Description: Authenticated staff identity endpoint
+    Value: !Sub https://${AdminApi}.execute-api.${AWS::Region}.${AWS::URLSuffix}/${StageName}/v1/admin/me
+
+  OpsTableName:
+    Description: KASANE operations single table
+    Value: !Ref OpsTable
+
+  StaffUserPoolId:
+    Description: KASANE staff Cognito User Pool
+    Value: !Ref StaffUserPool
+
+  StaffUserPoolClientId:
+    Description: KASANE Admin application client
+    Value: !Ref StaffUserPoolClient
+
   TurnstileSecretArn:
     Value: !Ref TurnstileSecret

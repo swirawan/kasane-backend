@@ -1,0 +1,1 @@
+# AWS Lambda runtime provides boto3/botocore
