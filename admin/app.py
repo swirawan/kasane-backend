@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import base64
+import hashlib
+import hmac
 import json
 import logging
 import os
@@ -23,6 +25,20 @@ STAFF_USER_POOL_ID = os.environ.get(
     "STAFF_USER_POOL_ID",
     "",
 )
+
+PREVIEW_TOKEN_SECRET_ARN = os.environ.get(
+    "PREVIEW_TOKEN_SECRET_ARN",
+    "",
+).strip()
+
+PREVIEW_BASE_URL = os.environ.get(
+    "PREVIEW_BASE_URL",
+    "",
+).strip()
+
+PREVIEW_TOKEN_TTL_SECONDS = 900
+
+_preview_token_secret_value = None
 
 ORGANIZATION_ROLES = (
     "OWNER",
@@ -4437,6 +4453,133 @@ def _authorize_identity(
         "profile": staff,
         "role": role,
     }, None
+
+
+
+def _preview_token_secret() -> str:
+    global _preview_token_secret_value
+
+    if not PREVIEW_TOKEN_SECRET_ARN:
+        raise RuntimeError(
+            "preview_secret_not_configured"
+        )
+
+    if _preview_token_secret_value is None:
+        response = (
+            boto3.client("secretsmanager")
+            .get_secret_value(
+                SecretId=PREVIEW_TOKEN_SECRET_ARN
+            )
+        )
+
+        secret = str(
+            response.get("SecretString")
+            or ""
+        ).strip()
+
+        if not secret:
+            raise RuntimeError(
+                "preview_secret_empty"
+            )
+
+        _preview_token_secret_value = secret
+
+    return _preview_token_secret_value
+
+
+def _handle_preview_access(
+    identity: dict[str, Any],
+):
+    if (
+        STAGE != "dev"
+        or not PREVIEW_TOKEN_SECRET_ARN
+        or not PREVIEW_BASE_URL
+    ):
+        return _response(
+            404,
+            {"error": "preview_not_available"},
+        )
+
+    role = str(
+        identity.get("role")
+        or ""
+    ).strip().upper()
+
+    if role not in {
+        "OWNER",
+        "MANAGER",
+    }:
+        return _response(
+            403,
+            {
+                "error":
+                    "manager_or_owner_required"
+            },
+        )
+
+    try:
+        secret = _preview_token_secret()
+    except (
+        BotoCoreError,
+        ClientError,
+        RuntimeError,
+    ):
+        LOGGER.exception(
+            "Preview token secret lookup failed"
+        )
+
+        return _response(
+            503,
+            {"error": "temporarily_unavailable"},
+        )
+
+    now = int(
+        datetime.now(timezone.utc).timestamp()
+    )
+
+    expires = (
+        now + PREVIEW_TOKEN_TTL_SECONDS
+    )
+
+    nonce = uuid4().hex
+
+    message = (
+        f"v1.{expires}.{nonce}.{role}"
+    )
+
+    signature = (
+        base64.urlsafe_b64encode(
+            hmac.new(
+                secret.encode("utf-8"),
+                message.encode("utf-8"),
+                hashlib.sha256,
+            ).digest()
+        )
+        .decode("ascii")
+        .rstrip("=")
+    )
+
+    token = f"{message}.{signature}"
+
+    preview_url = (
+        f"{PREVIEW_BASE_URL.rstrip('/')}"
+        f"/?preview={token}"
+    )
+
+    return _response(
+        200,
+        {
+            "previewUrl": preview_url,
+            "expiresAt": (
+                datetime.fromtimestamp(
+                    expires,
+                    timezone.utc,
+                ).isoformat()
+            ),
+            "expiresInSeconds":
+                PREVIEW_TOKEN_TTL_SECONDS,
+        },
+    )
 
 
 def _request_body(
@@ -10245,6 +10388,16 @@ def handler(
         )
     ):
         return _me_response(identity)
+
+    if (
+        method == "POST"
+        and path.endswith(
+            "/v1/admin/preview-access"
+        )
+    ):
+        return _handle_preview_access(
+            identity
+        )
 
     if (
         method == "PATCH"

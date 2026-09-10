@@ -46,6 +46,20 @@ Parameters:
     Default: http://localhost:5173,https://swirawan.github.io
     Description: Origins allowed to call the KASANE Admin API.
 
+
+  PreviewTokenSecretArn:
+    Type: String
+    Default: ''
+    Description: Secrets Manager ARN used to sign protected DEV preview access.
+
+  PreviewBaseUrl:
+    Type: String
+    Default: ''
+    Description: Protected DEV preview site base URL.
+
+Conditions:
+  HasPreviewTokenSecret: !Not [!Equals [!Ref PreviewTokenSecretArn, '']]
+
 Globals:
   Function:
     Runtime: python3.13
@@ -409,6 +423,8 @@ Resources:
           LEADS_TABLE_NAME: !Ref LeadsTable
           STAFF_USER_POOL_ID: !Ref StaffUserPool
           STAGE: !Ref StageName
+          PREVIEW_TOKEN_SECRET_ARN: !Ref PreviewTokenSecretArn
+          PREVIEW_BASE_URL: !Ref PreviewBaseUrl
 
       Policies:
         - DynamoDBCrudPolicy:
@@ -430,6 +446,15 @@ Resources:
                 - cognito-idp:AdminUserGlobalSignOut
               Resource: !GetAtt StaffUserPool.Arn
 
+        - Statement:
+            - Effect: Allow
+              Action:
+                - secretsmanager:GetSecretValue
+              Resource: !If
+                - HasPreviewTokenSecret
+                - !Ref PreviewTokenSecretArn
+                - !Sub arn:${AWS::Partition}:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:kasane-preview-disabled
+
       Events:
         CurrentStaffMember:
           Type: HttpApi
@@ -437,6 +462,13 @@ Resources:
             ApiId: !Ref AdminApi
             Path: /v1/admin/me
             Method: GET
+
+        PreviewAccess:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref AdminApi
+            Path: /v1/admin/preview-access
+            Method: POST
 
         UpdateCurrentStaffPreferences:
           Type: HttpApi
