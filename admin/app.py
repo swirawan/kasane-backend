@@ -594,6 +594,16 @@ def _public_project(
         ),
         "projectColor":
             _project_color(item),
+        "activeMemberUserIds": [
+            str(user_id)
+            for user_id in (
+                item.get(
+                    "activeMemberUserIds"
+                )
+                or []
+            )
+            if str(user_id).strip()
+        ],
         "activeMemberCount": int(
             item.get("activeMemberCount")
             or 0
@@ -3656,6 +3666,7 @@ def _project_assignment_summary(
     )
 
     active_member_count = 0
+    active_member_user_ids = []
     project_lead_user_ids = []
 
     for membership in (
@@ -3687,6 +3698,9 @@ def _project_assignment_summary(
             continue
 
         active_member_count += 1
+        active_member_user_ids.append(
+            user_id
+        )
 
         if (
             membership.get(
@@ -3699,6 +3713,12 @@ def _project_assignment_summary(
             )
 
     return {
+        "activeMemberUserIds":
+            sorted(
+                set(
+                    active_member_user_ids
+                )
+            ),
         "activeMemberCount":
             active_member_count,
         "projectLeadUserIds":
@@ -3728,6 +3748,8 @@ def _refresh_project_assignment_summary(
         },
         UpdateExpression=(
             "SET "
+            "activeMemberUserIds = "
+            ":member_ids, "
             "activeMemberCount = "
             ":member_count, "
             "projectLeadUserIds = "
@@ -3740,6 +3762,10 @@ def _refresh_project_assignment_summary(
             "AND recordType = :project_type"
         ),
         ExpressionAttributeValues={
+            ":member_ids":
+                summary[
+                    "activeMemberUserIds"
+                ],
             ":member_count":
                 summary[
                     "activeMemberCount"

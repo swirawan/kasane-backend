@@ -119,6 +119,10 @@ def test_assignment_summary_counts_only_active_members():
         )
 
     assert result == {
+        "activeMemberUserIds": [
+            "lead-1",
+            "worker-1",
+        ],
         "activeMemberCount": 2,
         "projectLeadUserIds": [
             "lead-1"
@@ -135,12 +139,26 @@ def test_public_project_exposes_assignment_summary():
                 "PROJECT",
             "status":
                 "ACTIVE",
+            "activeMemberUserIds": [
+                "lead-1",
+                "worker-1",
+                "worker-2",
+            ],
             "activeMemberCount":
                 3,
             "projectLeadUserIds": [
                 "lead-1",
             ],
         }
+    )
+
+    assert (
+        result["activeMemberUserIds"]
+        == [
+            "lead-1",
+            "worker-1",
+            "worker-2",
+        ]
     )
 
     assert (
