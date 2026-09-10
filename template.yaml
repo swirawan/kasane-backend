@@ -629,6 +629,34 @@ Resources:
             Path: /v1/admin/projects/{projectId}/members/{userId}
             Method: DELETE
 
+        ListVendors:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref AdminApi
+            Path: /v1/admin/vendors
+            Method: GET
+
+        CreateVendor:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref AdminApi
+            Path: /v1/admin/vendors
+            Method: POST
+
+        GetVendor:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref AdminApi
+            Path: /v1/admin/vendors/{vendorId}
+            Method: GET
+
+        UpdateVendor:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref AdminApi
+            Path: /v1/admin/vendors/{vendorId}
+            Method: PATCH
+
         StaffDirectory:
           Type: HttpApi
           Properties:

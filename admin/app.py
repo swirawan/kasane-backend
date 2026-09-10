@@ -98,8 +98,41 @@ FOLLOW_UP_STATUSES = (
     "CANCELED",
 )
 
+VENDOR_STATUSES = (
+    "ACTIVE",
+    "PREFERRED",
+    "INACTIVE",
+    "DO_NOT_USE",
+)
+
+VENDOR_CATEGORIES = (
+    "VENUE",
+    "CATERING",
+    "DECORATION",
+    "PHOTO_VIDEO",
+    "ENTERTAINMENT",
+    "MC",
+    "MAKEUP",
+    "ATTIRE",
+    "INVITATION_STATIONERY",
+    "CAKE_DESSERT",
+    "FLORIST",
+    "RENTAL",
+    "LIGHTING_SOUND",
+    "TRANSPORTATION",
+    "ACCOMMODATION",
+    "SECURITY",
+    "GIFT_SOUVENIR",
+    "CEREMONY",
+    "OTHER",
+)
+
 
 class LeadConversionConflict(RuntimeError):
+    pass
+
+
+class VendorWriteConflict(RuntimeError):
     pass
 
 
@@ -7557,6 +7590,1004 @@ def _handle_status_change(
     )
 
 
+
+def _normalize_vendor_status(
+    value: Any,
+) -> str | None:
+    status = (
+        str(value or "")
+        .strip()
+        .upper()
+        .replace(" ", "_")
+        .replace("-", "_")
+    )
+
+    if status not in VENDOR_STATUSES:
+        return None
+
+    return status
+
+
+def _normalize_vendor_category(
+    value: Any,
+) -> str | None:
+    category = (
+        str(value or "")
+        .strip()
+        .upper()
+        .replace(" ", "_")
+        .replace("-", "_")
+    )
+
+    if category not in VENDOR_CATEGORIES:
+        return None
+
+    return category
+
+
+def _normalize_vendor_services(
+    value: Any,
+) -> list[str] | None:
+    if value is None:
+        return []
+
+    if isinstance(value, str):
+        raw_items = (
+            value
+            .replace("\r", "\n")
+            .replace(",", "\n")
+            .splitlines()
+        )
+
+    elif isinstance(value, list):
+        raw_items = value
+
+    else:
+        return None
+
+    result = []
+    seen = set()
+
+    for raw_item in raw_items:
+        service = str(
+            raw_item or ""
+        ).strip()
+
+        if not service:
+            continue
+
+        if len(service) > 120:
+            return None
+
+        key = service.casefold()
+
+        if key in seen:
+            continue
+
+        seen.add(key)
+        result.append(service)
+
+        if len(result) > 20:
+            return None
+
+    return result
+
+
+def _vendor_request_fields(
+    body: dict[str, Any],
+    *,
+    partial: bool,
+) -> dict[str, Any]:
+    if not isinstance(body, dict):
+        raise ValueError(
+            "invalid_json"
+        )
+
+    result: dict[str, Any] = {}
+
+    text_fields = {
+        "name": 160,
+        "contactPerson": 120,
+        "phone": 60,
+        "whatsapp": 60,
+        "email": 254,
+        "city": 120,
+        "pricingNotes": 4000,
+        "internalNotes": 8000,
+    }
+
+    for field, max_length in (
+        text_fields.items()
+    ):
+        if (
+            partial
+            and field not in body
+        ):
+            continue
+
+        value = str(
+            body.get(field)
+            or ""
+        ).strip()
+
+        if len(value) > max_length:
+            raise ValueError(
+                f"{field}_too_long"
+            )
+
+        if (
+            field == "name"
+            and not value
+        ):
+            raise ValueError(
+                "vendor_name_required"
+            )
+
+        result[field] = value
+
+    if (
+        not partial
+        or "category" in body
+    ):
+        category = (
+            _normalize_vendor_category(
+                body.get("category")
+            )
+        )
+
+        if not category:
+            raise ValueError(
+                "invalid_vendor_category"
+            )
+
+        result["category"] = category
+
+    if (
+        not partial
+        or "status" in body
+    ):
+        raw_status = (
+            body.get("status")
+            if "status" in body
+            else "ACTIVE"
+        )
+
+        status = (
+            _normalize_vendor_status(
+                raw_status
+            )
+        )
+
+        if not status:
+            raise ValueError(
+                "invalid_vendor_status"
+            )
+
+        result["status"] = status
+
+    if (
+        not partial
+        or "services" in body
+    ):
+        services = (
+            _normalize_vendor_services(
+                body.get("services")
+            )
+        )
+
+        if services is None:
+            raise ValueError(
+                "invalid_vendor_services"
+            )
+
+        result["services"] = services
+
+    return result
+
+
+def _public_vendor(
+    item: dict[str, Any],
+) -> dict[str, Any]:
+    services = item.get("services")
+
+    if not isinstance(
+        services,
+        list,
+    ):
+        services = []
+
+    return {
+        "vendorId": str(
+            item.get("vendorId")
+            or ""
+        ),
+        "name": str(
+            item.get("name")
+            or ""
+        ),
+        "category": str(
+            item.get("category")
+            or ""
+        ),
+        "contactPerson": str(
+            item.get("contactPerson")
+            or ""
+        ),
+        "phone": str(
+            item.get("phone")
+            or ""
+        ),
+        "whatsapp": str(
+            item.get("whatsapp")
+            or ""
+        ),
+        "email": str(
+            item.get("email")
+            or ""
+        ),
+        "city": str(
+            item.get("city")
+            or ""
+        ),
+        "services": [
+            str(service)
+            for service in services
+            if str(service).strip()
+        ],
+        "pricingNotes": str(
+            item.get("pricingNotes")
+            or ""
+        ),
+        "internalNotes": str(
+            item.get("internalNotes")
+            or ""
+        ),
+        "status": str(
+            item.get("status")
+            or "ACTIVE"
+        ),
+        "createdAt": str(
+            item.get("createdAt")
+            or ""
+        ),
+        "createdBy": str(
+            item.get("createdBy")
+            or ""
+        ),
+        "updatedAt": str(
+            item.get("updatedAt")
+            or ""
+        ),
+        "updatedBy": str(
+            item.get("updatedBy")
+            or ""
+        ),
+    }
+
+
+def _vendor_name_index_key(
+    name: str,
+    vendor_id: str,
+) -> str:
+    return (
+        f"NAME#{name.casefold()}"
+        f"#VENDOR#{vendor_id}"
+    )
+
+
+def _vendor_record(
+    vendor_id: str,
+) -> dict[str, Any] | None:
+    response = _ops_table().get_item(
+        Key={
+            "PK":
+                f"VENDOR#{vendor_id}",
+            "SK":
+                "PROFILE",
+        },
+        ConsistentRead=True,
+    )
+
+    item = response.get("Item")
+
+    if (
+        not isinstance(item, dict)
+        or item.get("recordType")
+            != "VENDOR"
+    ):
+        return None
+
+    return item
+
+
+def _list_vendors(
+) -> list[dict[str, Any]]:
+    items = []
+
+    kwargs: dict[str, Any] = {
+        "IndexName": "GSI1",
+        "KeyConditionExpression":
+            "GSI1PK = :pk",
+        "ExpressionAttributeValues": {
+            ":pk":
+                "DIRECTORY#VENDORS",
+        },
+    }
+
+    while True:
+        response = (
+            _ops_table().query(
+                **kwargs
+            )
+        )
+
+        items.extend(
+            item
+            for item in (
+                response.get("Items")
+                or []
+            )
+            if (
+                isinstance(item, dict)
+                and item.get(
+                    "recordType"
+                )
+                == "VENDOR"
+            )
+        )
+
+        last_key = response.get(
+            "LastEvaluatedKey"
+        )
+
+        if not last_key:
+            break
+
+        kwargs[
+            "ExclusiveStartKey"
+        ] = last_key
+
+    return sorted(
+        items,
+        key=lambda item: (
+            str(
+                item.get("name")
+                or ""
+            ).casefold(),
+            str(
+                item.get("vendorId")
+                or ""
+            ),
+        ),
+    )
+
+
+def _vendor_audit_item(
+    vendor_id: str,
+    *,
+    action: str,
+    actor_subject: str,
+    before: dict[str, Any] | None,
+    after: dict[str, Any],
+    changed_fields: list[str],
+    now: str,
+) -> dict[str, Any]:
+    audit_id = _new_record_id(
+        "AUD"
+    )
+
+    return {
+        "PK":
+            f"VENDOR#{vendor_id}",
+        "SK":
+            (
+                f"AUDIT#{now}"
+                f"#{audit_id}"
+            ),
+        "recordType":
+            "VENDOR_AUDIT",
+        "auditId":
+            audit_id,
+        "vendorId":
+            vendor_id,
+        "action":
+            action,
+        "actorUserId":
+            actor_subject,
+        "changedFields":
+            changed_fields,
+        "before":
+            before or {},
+        "after":
+            after,
+        "createdAt":
+            now,
+    }
+
+
+def _create_vendor(
+    fields: dict[str, Any],
+    actor_subject: str,
+) -> dict[str, Any]:
+    vendor_id = _new_record_id(
+        "VEN"
+    )
+
+    now = _utcnow()
+
+    item = {
+        "PK":
+            f"VENDOR#{vendor_id}",
+        "SK":
+            "PROFILE",
+        "recordType":
+            "VENDOR",
+        "vendorId":
+            vendor_id,
+        **fields,
+        "createdAt":
+            now,
+        "createdBy":
+            actor_subject,
+        "updatedAt":
+            now,
+        "updatedBy":
+            actor_subject,
+        "GSI1PK":
+            "DIRECTORY#VENDORS",
+        "GSI1SK":
+            _vendor_name_index_key(
+                fields["name"],
+                vendor_id,
+            ),
+    }
+
+    public_after = (
+        _public_vendor(item)
+    )
+
+    audit = _vendor_audit_item(
+        vendor_id,
+        action="VENDOR_CREATED",
+        actor_subject=actor_subject,
+        before=None,
+        after=public_after,
+        changed_fields=sorted(
+            fields.keys()
+        ),
+        now=now,
+    )
+
+    boto3.client(
+        "dynamodb"
+    ).transact_write_items(
+        TransactItems=[
+            {
+                "Put": {
+                    "TableName":
+                        OPS_TABLE_NAME,
+                    "Item":
+                        _serialize_map(
+                            item
+                        ),
+                    "ConditionExpression": (
+                        "attribute_not_exists("
+                        "PK)"
+                    ),
+                }
+            },
+            {
+                "Put": {
+                    "TableName":
+                        OPS_TABLE_NAME,
+                    "Item":
+                        _serialize_map(
+                            audit
+                        ),
+                    "ConditionExpression": (
+                        "attribute_not_exists("
+                        "PK) "
+                        "AND "
+                        "attribute_not_exists("
+                        "SK)"
+                    ),
+                }
+            },
+        ]
+    )
+
+    return item
+
+
+def _update_vendor(
+    current: dict[str, Any],
+    changes: dict[str, Any],
+    actor_subject: str,
+) -> tuple[
+    dict[str, Any],
+    bool,
+]:
+    changed_fields = [
+        field
+        for field, value in (
+            changes.items()
+        )
+        if current.get(field) != value
+    ]
+
+    if not changed_fields:
+        return current, False
+
+    now = _utcnow()
+
+    updated = {
+        **current,
+        **changes,
+        "updatedAt":
+            now,
+        "updatedBy":
+            actor_subject,
+    }
+
+    vendor_id = str(
+        current.get("vendorId")
+        or ""
+    )
+
+    updated["GSI1PK"] = (
+        "DIRECTORY#VENDORS"
+    )
+
+    updated["GSI1SK"] = (
+        _vendor_name_index_key(
+            str(
+                updated.get("name")
+                or ""
+            ),
+            vendor_id,
+        )
+    )
+
+    before_public = (
+        _public_vendor(current)
+    )
+
+    after_public = (
+        _public_vendor(updated)
+    )
+
+    action = (
+        "VENDOR_STATUS_CHANGED"
+        if "status" in changed_fields
+        else "VENDOR_UPDATED"
+    )
+
+    audit = _vendor_audit_item(
+        vendor_id,
+        action=action,
+        actor_subject=actor_subject,
+        before=before_public,
+        after=after_public,
+        changed_fields=sorted(
+            changed_fields
+        ),
+        now=now,
+    )
+
+    expected_updated = str(
+        current.get("updatedAt")
+        or ""
+    )
+
+    condition = (
+        "recordType = :vendor_type"
+    )
+
+    condition_values = {
+        ":vendor_type":
+            "VENDOR",
+    }
+
+    if expected_updated:
+        condition += (
+            " AND "
+            "updatedAt = "
+            ":expected_updated"
+        )
+
+        condition_values[
+            ":expected_updated"
+        ] = expected_updated
+
+    try:
+        boto3.client(
+            "dynamodb"
+        ).transact_write_items(
+            TransactItems=[
+                {
+                    "Put": {
+                        "TableName":
+                            OPS_TABLE_NAME,
+                        "Item":
+                            _serialize_map(
+                                updated
+                            ),
+                        "ConditionExpression":
+                            condition,
+                        "ExpressionAttributeValues":
+                            _serialize_map(
+                                condition_values
+                            ),
+                    }
+                },
+                {
+                    "Put": {
+                        "TableName":
+                            OPS_TABLE_NAME,
+                        "Item":
+                            _serialize_map(
+                                audit
+                            ),
+                        "ConditionExpression": (
+                            "attribute_not_exists("
+                            "PK) "
+                            "AND "
+                            "attribute_not_exists("
+                            "SK)"
+                        ),
+                    }
+                },
+            ]
+        )
+
+    except ClientError as exc:
+        if (
+            _aws_error_code(exc)
+            ==
+            "TransactionCanceledException"
+        ):
+            raise VendorWriteConflict(
+                "vendor_write_conflict"
+            ) from exc
+
+        raise
+
+    return updated, True
+
+
+def _vendor_id_from_event(
+    event: dict[str, Any],
+) -> str:
+    parameters = (
+        event.get("pathParameters")
+        or {}
+    )
+
+    vendor_id = str(
+        parameters.get("vendorId")
+        or ""
+    ).strip().upper()
+
+    if not vendor_id.startswith(
+        "VEN-"
+    ):
+        return ""
+
+    return vendor_id
+
+
+def _handle_list_vendors():
+    try:
+        vendors = _list_vendors()
+
+    except (
+        BotoCoreError,
+        ClientError,
+        RuntimeError,
+    ):
+        LOGGER.exception(
+            "Failed to list vendors"
+        )
+
+        return _response(
+            503,
+            {
+                "error":
+                    "temporarily_unavailable"
+            },
+        )
+
+    return _response(
+        200,
+        {
+            "items": [
+                _public_vendor(vendor)
+                for vendor in vendors
+            ],
+            "count":
+                len(vendors),
+        },
+    )
+
+
+def _handle_get_vendor(
+    event: dict[str, Any],
+):
+    vendor_id = (
+        _vendor_id_from_event(
+            event
+        )
+    )
+
+    if not vendor_id:
+        return _response(
+            400,
+            {
+                "error":
+                    "vendor_id_required"
+            },
+        )
+
+    try:
+        vendor = _vendor_record(
+            vendor_id
+        )
+
+    except (
+        BotoCoreError,
+        ClientError,
+        RuntimeError,
+    ):
+        LOGGER.exception(
+            "Failed to get vendor"
+        )
+
+        return _response(
+            503,
+            {
+                "error":
+                    "temporarily_unavailable"
+            },
+        )
+
+    if not vendor:
+        return _response(
+            404,
+            {
+                "error":
+                    "vendor_not_found"
+            },
+        )
+
+    return _response(
+        200,
+        {
+            "vendor":
+                _public_vendor(
+                    vendor
+                )
+        },
+    )
+
+
+def _handle_create_vendor(
+    event: dict[str, Any],
+    identity: dict[str, Any],
+):
+    body = _request_body(event)
+
+    if body is None:
+        return _response(
+            400,
+            {
+                "error":
+                    "invalid_json"
+            },
+        )
+
+    try:
+        fields = (
+            _vendor_request_fields(
+                body,
+                partial=False,
+            )
+        )
+
+    except ValueError as exc:
+        return _response(
+            400,
+            {
+                "error":
+                    str(exc)
+            },
+        )
+
+    if (
+        fields["status"]
+        != "ACTIVE"
+        and identity["role"]
+        not in {
+            "OWNER",
+            "MANAGER",
+        }
+    ):
+        return _response(
+            403,
+            {
+                "error":
+                    "manager_or_owner_required"
+            },
+        )
+
+    try:
+        vendor = _create_vendor(
+            fields,
+            identity["subject"],
+        )
+
+    except (
+        BotoCoreError,
+        ClientError,
+        RuntimeError,
+    ):
+        LOGGER.exception(
+            "Failed to create vendor"
+        )
+
+        return _response(
+            503,
+            {
+                "error":
+                    "temporarily_unavailable"
+            },
+        )
+
+    return _response(
+        201,
+        {
+            "vendor":
+                _public_vendor(
+                    vendor
+                )
+        },
+    )
+
+
+def _handle_update_vendor(
+    event: dict[str, Any],
+    identity: dict[str, Any],
+):
+    vendor_id = (
+        _vendor_id_from_event(
+            event
+        )
+    )
+
+    if not vendor_id:
+        return _response(
+            400,
+            {
+                "error":
+                    "vendor_id_required"
+            },
+        )
+
+    body = _request_body(event)
+
+    if body is None:
+        return _response(
+            400,
+            {
+                "error":
+                    "invalid_json"
+            },
+        )
+
+    try:
+        changes = (
+            _vendor_request_fields(
+                body,
+                partial=True,
+            )
+        )
+
+    except ValueError as exc:
+        return _response(
+            400,
+            {
+                "error":
+                    str(exc)
+            },
+        )
+
+    try:
+        current = _vendor_record(
+            vendor_id
+        )
+
+        if not current:
+            return _response(
+                404,
+                {
+                    "error":
+                        "vendor_not_found"
+                },
+            )
+
+        requested_status = (
+            changes.get("status")
+        )
+
+        current_status = str(
+            current.get("status")
+            or "ACTIVE"
+        )
+
+        if (
+            requested_status
+            and requested_status
+                != current_status
+            and identity["role"]
+                not in {
+                    "OWNER",
+                    "MANAGER",
+                }
+        ):
+            return _response(
+                403,
+                {
+                    "error":
+                        "manager_or_owner_required"
+                },
+            )
+
+        updated, changed = (
+            _update_vendor(
+                current,
+                changes,
+                identity["subject"],
+            )
+        )
+
+    except VendorWriteConflict:
+        return _response(
+            409,
+            {
+                "error":
+                    "vendor_changed_refresh"
+            },
+        )
+
+    except (
+        BotoCoreError,
+        ClientError,
+        RuntimeError,
+    ):
+        LOGGER.exception(
+            "Failed to update vendor"
+        )
+
+        return _response(
+            503,
+            {
+                "error":
+                    "temporarily_unavailable"
+            },
+        )
+
+    return _response(
+        200,
+        {
+            "vendor":
+                _public_vendor(
+                    updated
+                ),
+            "changed":
+                changed,
+        },
+    )
+
+
 def handler(
     event: dict[str, Any],
     context: Any,
@@ -7683,6 +8714,42 @@ def handler(
         return _handle_convert_lead(
             event,
             identity["subject"],
+        )
+
+    if (
+        method == "GET"
+        and path.endswith(
+            "/v1/admin/vendors"
+        )
+    ):
+        return _handle_list_vendors()
+
+    if (
+        method == "POST"
+        and path.endswith(
+            "/v1/admin/vendors"
+        )
+    ):
+        return _handle_create_vendor(
+            event,
+            identity,
+        )
+
+    if (
+        method == "GET"
+        and "/v1/admin/vendors/" in path
+    ):
+        return _handle_get_vendor(
+            event
+        )
+
+    if (
+        method == "PATCH"
+        and "/v1/admin/vendors/" in path
+    ):
+        return _handle_update_vendor(
+            event,
+            identity,
         )
 
     if (
