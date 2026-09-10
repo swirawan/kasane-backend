@@ -90,6 +90,8 @@ Resources:
       Environment:
         Variables:
           TABLE_NAME: !Ref LeadsTable
+          OPS_TABLE_NAME: !Ref OpsTable
+          OPS_STAFF_INDEX_NAME: GSI2
           ALLOWED_ORIGINS: !Ref AllowedOriginsEnv
           CAPTCHA_REQUIRED: !Ref CaptchaRequired
           TURNSTILE_SECRET_ARN: !Ref TurnstileSecret
@@ -106,6 +108,9 @@ Resources:
             - Effect: Allow
               Action: dynamodb:TransactWriteItems
               Resource: !GetAtt LeadsTable.Arn
+            - Effect: Allow
+              Action: dynamodb:Query
+              Resource: !Sub '${OpsTable.Arn}/index/GSI2'
             - Effect: Allow
               Action: secretsmanager:GetSecretValue
               Resource: !Ref TurnstileSecret
@@ -432,6 +437,13 @@ Resources:
             ApiId: !Ref AdminApi
             Path: /v1/admin/me
             Method: GET
+
+        UpdateCurrentStaffPreferences:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref AdminApi
+            Path: /v1/admin/me/preferences
+            Method: PATCH
 
         ListLeads:
           Type: HttpApi

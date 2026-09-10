@@ -4282,6 +4282,29 @@ def _staff_id(
     return ""
 
 
+def _new_lead_email_notifications(
+    staff: dict[str, Any],
+) -> bool:
+    value = staff.get(
+        "newLeadEmailNotifications"
+    )
+
+    if isinstance(value, bool):
+        return value
+
+    role = str(
+        staff.get("organizationRole")
+        or ""
+    ).strip().upper()
+
+    # Existing OWNER / MANAGER accounts
+    # predate the preference field.
+    return role in {
+        "OWNER",
+        "MANAGER",
+    }
+
+
 def _public_staff(
     staff: dict[str, Any],
 ) -> dict[str, Any]:
@@ -4317,6 +4340,11 @@ def _public_staff(
             staff.get("updatedAt")
             or ""
         ),
+        "newLeadEmailNotifications":
+            _new_lead_email_notifications(
+                staff
+            ),
+
     }
 
 
@@ -4626,6 +4654,11 @@ def _create_staff(
             "status": "ACTIVE",
             "authzVersion": 1,
             "preferredLocale": locale,
+            "newLeadEmailNotifications":
+                role in {
+                    "OWNER",
+                    "MANAGER",
+                },
             "GSI2PK": "STAFF",
             "GSI2SK": (
                 f"ROLE#{role}"
@@ -7440,6 +7473,108 @@ def _handle_create_staff(
     )
 
 
+def _handle_my_preferences(
+    event: dict[str, Any],
+    identity: dict[str, Any],
+):
+    if identity["role"] not in {
+        "OWNER",
+        "MANAGER",
+    }:
+        return _response(
+            403,
+            {
+                "error":
+                    "lead_notifications_not_available_for_role"
+            },
+        )
+
+    body = _request_body(event)
+
+    if body is None:
+        return _response(
+            400,
+            {"error": "invalid_json"},
+        )
+
+    enabled = body.get(
+        "newLeadEmailNotifications"
+    )
+
+    if not isinstance(enabled, bool):
+        return _response(
+            400,
+            {
+                "error":
+                    "new_lead_email_notifications_boolean_required"
+            },
+        )
+
+    subject = identity["subject"]
+    now = _utcnow()
+
+    try:
+        response = (
+            _ops_table().update_item(
+                Key={
+                    "PK":
+                        f"USER#{subject}",
+                    "SK":
+                        "PROFILE",
+                },
+                UpdateExpression=(
+                    "SET "
+                    "newLeadEmailNotifications = :enabled, "
+                    "updatedAt = :updated, "
+                    "updatedBy = :actor"
+                ),
+                ExpressionAttributeValues={
+                    ":enabled":
+                        enabled,
+                    ":updated":
+                        now,
+                    ":actor":
+                        subject,
+                },
+                ConditionExpression=(
+                    "attribute_exists(PK) "
+                    "AND attribute_exists(SK)"
+                ),
+                ReturnValues="ALL_NEW",
+            )
+        )
+
+    except (
+        BotoCoreError,
+        ClientError,
+        RuntimeError,
+    ):
+        LOGGER.exception(
+            "Notification preference update failed"
+        )
+
+        return _response(
+            503,
+            {
+                "error":
+                    "temporarily_unavailable"
+            },
+        )
+
+    updated = response[
+        "Attributes"
+    ]
+
+    return _response(
+        200,
+        {
+            "ok": True,
+            "user":
+                _public_staff(updated),
+        },
+    )
+
+
 def _target_user_id(
     event: dict[str, Any],
 ) -> str:
@@ -10110,6 +10245,17 @@ def handler(
         )
     ):
         return _me_response(identity)
+
+    if (
+        method == "PATCH"
+        and path.endswith(
+            "/v1/admin/me/preferences"
+        )
+    ):
+        return _handle_my_preferences(
+            event,
+            identity,
+        )
 
     if (
         method == "GET"

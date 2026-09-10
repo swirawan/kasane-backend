@@ -21,6 +21,14 @@ LOGGER = logging.getLogger()
 LOGGER.setLevel(os.getenv("LOG_LEVEL", "INFO"))
 
 TABLE_NAME = os.environ.get("TABLE_NAME", "")
+OPS_TABLE_NAME = os.environ.get(
+    "OPS_TABLE_NAME",
+    "",
+)
+OPS_STAFF_INDEX_NAME = os.environ.get(
+    "OPS_STAFF_INDEX_NAME",
+    "GSI2",
+)
 STAGE = os.environ.get("STAGE", "dev")
 EMAIL_ENABLED = os.environ.get("EMAIL_ENABLED", "false").lower() == "true"
 FROM_EMAIL = os.environ.get("FROM_EMAIL", "")
@@ -35,6 +43,7 @@ ALLOWED_ORIGINS = {x.strip() for x in os.environ.get("ALLOWED_ORIGINS", "").spli
 LEAD_RETENTION_DAYS = int(os.environ.get("LEAD_RETENTION_DAYS", "730"))
 
 _ddb = None
+_ops_ddb = None
 _ddb_client_instance = None
 _ses = None
 _secrets = None
@@ -60,6 +69,23 @@ def _ddb_table():
     if _ddb is None:
         _ddb = boto3.resource("dynamodb").Table(TABLE_NAME)
     return _ddb
+
+
+def _ops_table():
+    global _ops_ddb
+
+    if not OPS_TABLE_NAME:
+        raise RuntimeError(
+            "OPS_TABLE_NAME is not configured"
+        )
+
+    if _ops_ddb is None:
+        _ops_ddb = (
+            boto3.resource("dynamodb")
+            .Table(OPS_TABLE_NAME)
+        )
+
+    return _ops_ddb
 
 
 def _ddb_client():
@@ -637,15 +663,121 @@ def _lead_email_html(reference: str, lead: dict[str, Any]) -> str:
     </body></html>"""
 
 
+def _notification_recipients() -> list[str]:
+    # Legacy fallback for environments
+    # that have not yet wired OpsTable.
+    if (
+        not OPS_TABLE_NAME
+        or not OPS_STAFF_INDEX_NAME
+    ):
+        return sorted(
+            set(NOTIFICATION_EMAILS)
+        )
+
+    recipients: list[str] = []
+    last_key = None
+
+    while True:
+        kwargs: dict[str, Any] = {
+            "IndexName":
+                OPS_STAFF_INDEX_NAME,
+            "KeyConditionExpression":
+                "GSI2PK = :staff",
+            "ExpressionAttributeValues": {
+                ":staff": "STAFF",
+            },
+        }
+
+        if last_key:
+            kwargs[
+                "ExclusiveStartKey"
+            ] = last_key
+
+        response = (
+            _ops_table().query(
+                **kwargs
+            )
+        )
+
+        for item in (
+            response.get("Items")
+            or []
+        ):
+            role = str(
+                item.get(
+                    "organizationRole"
+                )
+                or ""
+            ).strip().upper()
+
+            status = str(
+                item.get("status")
+                or ""
+            ).strip().upper()
+
+            if status != "ACTIVE":
+                continue
+
+            if role not in {
+                "OWNER",
+                "MANAGER",
+            }:
+                continue
+
+            # Existing eligible staff
+            # without this field default ON.
+            if (
+                item.get(
+                    "newLeadEmailNotifications"
+                )
+                is False
+            ):
+                continue
+
+            email = str(
+                item.get("email")
+                or ""
+            ).strip()
+
+            if (
+                email
+                and EMAIL_RE.match(email)
+            ):
+                recipients.append(
+                    email
+                )
+
+        last_key = response.get(
+            "LastEvaluatedKey"
+        )
+
+        if not last_key:
+            break
+
+    return sorted(
+        set(recipients)
+    )
+
+
 def _send_notification(reference: str, lead: dict[str, Any]) -> bool:
     if not EMAIL_ENABLED:
         return False
-    if not FROM_EMAIL or not NOTIFICATION_EMAILS:
-        LOGGER.warning("EMAIL_ENABLED=true but sender/recipient configuration is incomplete")
+    recipients = (
+        _notification_recipients()
+    )
+
+    if not FROM_EMAIL or not recipients:
+        LOGGER.warning(
+            "EMAIL_ENABLED=true but "
+            "sender/recipient configuration "
+            "is incomplete"
+        )
         return False
     kwargs: dict[str, Any] = {
         "FromEmailAddress": FROM_EMAIL,
-        "Destination": {"ToAddresses": NOTIFICATION_EMAILS},
+        "Destination": {
+            "ToAddresses": recipients
+        },
         "Content": {
             "Simple": {
                 "Subject": {"Data": f"[{reference}] {lead['eventType']} — {lead['name']}", "Charset": "UTF-8"},
