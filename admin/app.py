@@ -720,6 +720,18 @@ def _public_project(
             item.get("preferredContact")
             or ""
         ),
+        "package": str(
+            item.get("package")
+            or ""
+        ),
+        "product": str(
+            item.get("product")
+            or ""
+        ),
+        "direction": str(
+            item.get("direction")
+            or ""
+        ),
         "eventType": str(
             item.get("eventType")
             or ""
@@ -975,6 +987,273 @@ def _handle_update_project_color(
         {
             "project":
                 _public_project(updated)
+        },
+    )
+
+
+PROJECT_SCOPE_FIELDS = (
+    "package",
+    "product",
+    "direction",
+)
+
+
+def _project_scope_changes(
+    body: dict[str, Any],
+) -> dict[str, str]:
+    changes: dict[str, str] = {}
+
+    for field in PROJECT_SCOPE_FIELDS:
+        if field not in body:
+            continue
+
+        value = " ".join(
+            str(
+                body.get(field)
+                or ""
+            ).split()
+        )
+
+        if len(value) > 180:
+            raise ValueError(
+                f"{field}_too_long"
+            )
+
+        changes[field] = value
+
+    if not changes:
+        raise ValueError(
+            "scope_fields_required"
+        )
+
+    return changes
+
+
+def _update_project_scope(
+    current: dict[str, Any],
+    changes: dict[str, str],
+    actor_subject: str,
+) -> tuple[dict[str, Any], bool]:
+    changed_fields = [
+        field
+        for field, value in changes.items()
+        if str(
+            current.get(field)
+            or ""
+        ) != value
+    ]
+
+    if not changed_fields:
+        return current, False
+
+    project_id = str(
+        current.get("projectId")
+        or ""
+    )
+
+    now = _utcnow()
+
+    names = {
+        "#recordType": "recordType",
+    }
+
+    values: dict[str, Any] = {
+        ":project_type": "PROJECT",
+        ":updated": now,
+        ":actor": actor_subject,
+    }
+
+    set_parts = [
+        "updatedAt = :updated",
+        "updatedBy = :actor",
+    ]
+
+    remove_parts: list[str] = []
+
+    for index, field in enumerate(
+        changed_fields
+    ):
+        name_key = f"#scope{index}"
+        value_key = f":scope{index}"
+
+        names[name_key] = field
+
+        value = changes[field]
+
+        if value:
+            values[value_key] = value
+            set_parts.append(
+                f"{name_key} = {value_key}"
+            )
+        else:
+            remove_parts.append(
+                name_key
+            )
+
+    expression = (
+        "SET " + ", ".join(set_parts)
+    )
+
+    if remove_parts:
+        expression += (
+            " REMOVE "
+            + ", ".join(remove_parts)
+        )
+
+    response = _ops_table().update_item(
+        Key={
+            "PK":
+                f"PROJECT#{project_id}",
+            "SK":
+                "META",
+        },
+        UpdateExpression=expression,
+        ConditionExpression=(
+            "attribute_exists(PK) "
+            "AND attribute_exists(SK) "
+            "AND #recordType = :project_type"
+        ),
+        ExpressionAttributeNames=names,
+        ExpressionAttributeValues=values,
+        ReturnValues="ALL_NEW",
+    )
+
+    updated = response["Attributes"]
+
+    public = _public_project(updated)
+
+    _record_activity(
+        project_id,
+        actor_subject,
+        "PROJECT_SCOPE_UPDATED",
+        "Updated project scope",
+        {
+            "changedFields":
+                changed_fields,
+            "package":
+                public["package"],
+            "product":
+                public["product"],
+            "direction":
+                public["direction"],
+        },
+    )
+
+    return updated, True
+
+
+def _handle_update_project_scope(
+    event: dict[str, Any],
+    identity: dict[str, Any],
+):
+    parameters = (
+        event.get("pathParameters")
+        or {}
+    )
+
+    project_id = str(
+        parameters.get("projectId")
+        or ""
+    ).strip()
+
+    if not project_id:
+        return _response(
+            400,
+            {
+                "error":
+                    "project_id_required"
+            },
+        )
+
+    body = _request_body(event)
+
+    if body is None:
+        return _response(
+            400,
+            {"error": "invalid_json"},
+        )
+
+    try:
+        changes = (
+            _project_scope_changes(body)
+        )
+    except ValueError as exc:
+        return _response(
+            400,
+            {"error": str(exc)},
+        )
+
+    try:
+        current = _project_record(
+            project_id
+        )
+
+        if not current:
+            return _response(
+                404,
+                {
+                    "error":
+                        "project_not_found"
+                },
+            )
+
+        updated, changed = (
+            _update_project_scope(
+                current,
+                changes,
+                identity["subject"],
+            )
+        )
+
+    except ClientError as exc:
+        if (
+            _aws_error_code(exc)
+            ==
+            "ConditionalCheckFailedException"
+        ):
+            return _response(
+                404,
+                {
+                    "error":
+                        "project_not_found"
+                },
+            )
+
+        LOGGER.exception(
+            "Project scope update failed"
+        )
+
+        return _response(
+            503,
+            {
+                "error":
+                    "temporarily_unavailable"
+            },
+        )
+
+    except (
+        BotoCoreError,
+        RuntimeError,
+    ):
+        LOGGER.exception(
+            "Project scope update failed"
+        )
+
+        return _response(
+            503,
+            {
+                "error":
+                    "temporarily_unavailable"
+            },
+        )
+
+    return _response(
+        200,
+        {
+            "project":
+                _public_project(updated),
+            "changed":
+                changed,
         },
     )
 
@@ -1982,6 +2261,25 @@ def _handle_project_lifecycle(
     )
 
 
+def _project_scope_from_lead(
+    lead: dict[str, Any],
+) -> dict[str, str]:
+    return {
+        "package": str(
+            lead.get("package")
+            or ""
+        ).strip(),
+        "product": str(
+            lead.get("product")
+            or ""
+        ).strip(),
+        "direction": str(
+            lead.get("direction")
+            or ""
+        ).strip(),
+    }
+
+
 def _convert_lead(
     lead: dict[str, Any],
     actor_subject: str,
@@ -2079,6 +2377,9 @@ def _convert_lead(
             "preferredContact": str(
                 lead.get("preferredContact")
                 or ""
+            ),
+            **_project_scope_from_lead(
+                lead
             ),
             "eventType": event_type,
             "eventDate": event_date,
@@ -10976,6 +11277,28 @@ def handler(
                         lifecycle_action,
                     )
                 )
+
+    if (
+        method == "PATCH"
+        and path.endswith("/scope")
+        and "/v1/admin/projects/" in path
+    ):
+        if identity["role"] not in {
+            "OWNER",
+            "MANAGER",
+        }:
+            return _response(
+                403,
+                {
+                    "error":
+                        "manager_or_owner_required"
+                },
+            )
+
+        return _handle_update_project_scope(
+            event,
+            identity,
+        )
 
     if (
         method == "PATCH"

@@ -526,6 +526,13 @@ Resources:
             Path: /v1/admin/projects/{projectId}/color
             Method: PATCH
 
+        UpdateProjectScope:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref AdminApi
+            Path: /v1/admin/projects/{projectId}/scope
+            Method: PATCH
+
         CompleteProject:
           Type: HttpApi
           Properties:

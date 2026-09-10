@@ -1557,3 +1557,238 @@ def test_force_archive_open_work_requires_note():
     )
 
     transition.assert_not_called()
+
+
+
+def test_project_scope_from_lead_is_preserved():
+    item = lead()
+
+    item.update({
+        "package": "Plan + Coordinate",
+        "product": "KASANE MUSUBI",
+        "direction": "Quiet Luxury",
+    })
+
+    result = (
+        admin_app
+        ._project_scope_from_lead(item)
+    )
+
+    assert (
+        result["package"]
+        == "Plan + Coordinate"
+    )
+    assert (
+        result["product"]
+        == "KASANE MUSUBI"
+    )
+    assert (
+        result["direction"]
+        == "Quiet Luxury"
+    )
+
+
+def test_public_project_exposes_scope():
+    item = project()
+
+    item.update({
+        "package": "Full KASANE",
+        "product": "KASANE MUSUBI",
+        "direction": "Quiet Luxury",
+    })
+
+    result = admin_app._public_project(
+        item
+    )
+
+    assert result["package"] == "Full KASANE"
+    assert result["product"] == "KASANE MUSUBI"
+    assert result["direction"] == "Quiet Luxury"
+
+
+def test_manager_can_update_project_scope():
+    current = project()
+
+    updated = {
+        **current,
+        "package": "Plan + Coordinate",
+        "product": "",
+        "direction": "Quiet Luxury",
+    }
+
+    with patch.object(
+        admin_app,
+        "_authorize_identity",
+        return_value=(
+            identity("MANAGER"),
+            None,
+        ),
+    ), patch.object(
+        admin_app,
+        "_project_record",
+        return_value=current,
+    ), patch.object(
+        admin_app,
+        "_update_project_scope",
+        return_value=(
+            updated,
+            True,
+        ),
+    ) as update_scope:
+        response = admin_app.handler(
+            event(
+                "PATCH",
+                "/v1/admin/projects/"
+                "KAS-001/scope",
+                project_id="KAS-001",
+                payload={
+                    "package":
+                        "Plan + Coordinate",
+                    "product":
+                        "",
+                    "direction":
+                        "Quiet Luxury",
+                },
+            ),
+            None,
+        )
+
+    assert response["statusCode"] == 200
+
+    result = body(response)
+
+    assert result["changed"] is True
+    assert (
+        result["project"]["package"]
+        == "Plan + Coordinate"
+    )
+
+    update_scope.assert_called_once()
+
+
+def test_worker_cannot_update_project_scope():
+    with patch.object(
+        admin_app,
+        "_authorize_identity",
+        return_value=(
+            identity("WORKER"),
+            None,
+        ),
+    ):
+        response = admin_app.handler(
+            event(
+                "PATCH",
+                "/v1/admin/projects/"
+                "KAS-001/scope",
+                project_id="KAS-001",
+                payload={
+                    "package":
+                        "Full KASANE",
+                },
+            ),
+            None,
+        )
+
+    assert response["statusCode"] == 403
+    assert (
+        body(response)["error"]
+        ==
+        "manager_or_owner_required"
+    )
+
+
+def test_project_scope_requires_a_field():
+    with patch.object(
+        admin_app,
+        "_authorize_identity",
+        return_value=(
+            identity("OWNER"),
+            None,
+        ),
+    ):
+        response = admin_app.handler(
+            event(
+                "PATCH",
+                "/v1/admin/projects/"
+                "KAS-001/scope",
+                project_id="KAS-001",
+                payload={},
+            ),
+            None,
+        )
+
+    assert response["statusCode"] == 400
+    assert (
+        body(response)["error"]
+        ==
+        "scope_fields_required"
+    )
+
+
+def test_project_scope_update_records_activity():
+    current = project()
+
+    updated = {
+        **current,
+        "package":
+            "Plan + Coordinate",
+        "product":
+            "",
+        "direction":
+            "",
+        "updatedAt":
+            "2026-09-10T22:00:00+00:00",
+        "updatedBy":
+            "user-1",
+    }
+
+    with patch.object(
+        admin_app,
+        "_ops_table",
+    ) as table_factory, patch.object(
+        admin_app,
+        "_utcnow",
+        return_value=(
+            "2026-09-10T22:00:00+00:00"
+        ),
+    ), patch.object(
+        admin_app,
+        "_record_activity",
+    ) as activity:
+        table = table_factory.return_value
+
+        table.update_item.return_value = {
+            "Attributes": updated,
+        }
+
+        result, changed = (
+            admin_app._update_project_scope(
+                current,
+                {
+                    "package":
+                        "Plan + Coordinate",
+                },
+                "user-1",
+            )
+        )
+
+    assert changed is True
+    assert (
+        result["package"]
+        == "Plan + Coordinate"
+    )
+
+    activity.assert_called_once()
+
+    args = activity.call_args.args
+
+    assert args[0] == "KAS-001"
+    assert args[1] == "user-1"
+    assert (
+        args[2]
+        == "PROJECT_SCOPE_UPDATED"
+    )
+    assert (
+        "package"
+        in args[4]["changedFields"]
+    )
