@@ -8718,30 +8718,10 @@ def _project_vendor_request_fields(
 
     result: dict[str, Any] = {}
 
-    if (
-        not partial
-        or "category" in body
-    ):
-        raw_category = str(
-            body.get("category")
-            or ""
-        ).strip()
-
-        if raw_category:
-            category = (
-                _normalize_vendor_category(
-                    raw_category
-                )
-            )
-
-            if not category:
-                raise ValueError(
-                    "invalid_vendor_category"
-                )
-
-            result["category"] = (
-                category
-            )
+    if "category" in body:
+        raise ValueError(
+            "project_vendor_category_immutable"
+        )
 
     if (
         not partial
@@ -9712,13 +9692,12 @@ def _handle_link_project_vendor(
                 },
             )
 
-        if not fields.get(
-            "category"
-        ):
-            fields["category"] = str(
+        fields["category"] = (
+            _normalize_vendor_category(
                 vendor.get("category")
-                or "OTHER"
             )
+            or "OTHER"
+        )
 
         relationship, _ = (
             _link_project_vendor(

@@ -101,8 +101,6 @@ def test_project_vendor_fields_normalize():
         admin_app
         ._project_vendor_request_fields(
             {
-                "category":
-                    "catering",
                 "operationalStatus":
                     "quote received",
                 "bookingStatus":
@@ -116,10 +114,6 @@ def test_project_vendor_fields_normalize():
             },
             partial=False,
         )
-    )
-
-    assert result["category"] == (
-        "CATERING"
     )
 
     assert (
@@ -142,6 +136,30 @@ def test_project_vendor_fields_normalize():
     assert result["notes"] == (
         "Wedding package"
     )
+
+
+def test_project_vendor_category_is_immutable():
+    try:
+        (
+            admin_app
+            ._project_vendor_request_fields(
+                {
+                    "category":
+                        "PHOTO_VIDEO",
+                },
+                partial=True,
+            )
+        )
+
+    except ValueError as exc:
+        assert str(exc) == (
+            "project_vendor_category_immutable"
+        )
+
+    else:
+        raise AssertionError(
+            "Expected immutable category error"
+        )
 
 
 def test_project_vendor_invalid_amount():
