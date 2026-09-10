@@ -1,7 +1,7 @@
 import importlib.util
 import json
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 
 ADMIN_APP = (
@@ -454,6 +454,55 @@ def test_manager_can_list_global_followups():
 
     assert response["statusCode"] == 200
     assert body(response)["count"] == 1
+
+
+def test_append_activity_touches_project_last_activity():
+    table = MagicMock()
+
+    with patch.object(
+        admin_app,
+        "_ops_table",
+        return_value=table,
+    ), patch.object(
+        admin_app,
+        "_utcnow",
+        return_value="2026-09-10T12:34:56Z",
+    ), patch.object(
+        admin_app,
+        "_new_record_id",
+        return_value="ACT-TEST",
+    ):
+        result = admin_app._append_activity(
+            "KAS-003",
+            "user-1",
+            "FOLLOWUP_UPDATED",
+            "Updated follow-up",
+        )
+
+    assert result["createdAt"] == (
+        "2026-09-10T12:34:56Z"
+    )
+
+    table.put_item.assert_called_once()
+    table.update_item.assert_called_once()
+
+    update = (
+        table.update_item
+        .call_args.kwargs
+    )
+
+    assert update["Key"] == {
+        "PK": "PROJECT#KAS-003",
+        "SK": "META",
+    }
+
+    assert (
+        update[
+            "ExpressionAttributeValues"
+        ][":now"]
+        ==
+        "2026-09-10T12:34:56Z"
+    )
 
 
 def test_owner_can_list_activity():

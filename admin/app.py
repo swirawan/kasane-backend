@@ -728,6 +728,16 @@ def _public_project(
             item.get("updatedAt")
             or ""
         ),
+        "lastActivityAt": str(
+            item.get("lastActivityAt")
+            or item.get("updatedAt")
+            or ""
+        ),
+        "lastActivityBy": str(
+            item.get("lastActivityBy")
+            or item.get("updatedBy")
+            or ""
+        ),
         "completedAt": str(
             item.get("completedAt")
             or ""
@@ -2068,6 +2078,8 @@ def _convert_lead(
             "createdBy": actor_subject,
             "updatedAt": now,
             "updatedBy": actor_subject,
+            "lastActivityAt": now,
+            "lastActivityBy": actor_subject,
             "GSI3PK": "PROJECTS",
             "GSI3SK": (
                 "STATUS#ACTIVE"
@@ -2525,12 +2537,40 @@ def _append_activity(
             now,
     }
 
-    _ops_table().put_item(
+    table = _ops_table()
+
+    table.put_item(
         Item=item,
         ConditionExpression=(
             "attribute_not_exists(PK) "
             "AND attribute_not_exists(SK)"
         ),
+    )
+
+    table.update_item(
+        Key={
+            "PK":
+                f"PROJECT#{project_id}",
+            "SK":
+                "META",
+        },
+        UpdateExpression=(
+            "SET "
+            "lastActivityAt = :now, "
+            "lastActivityBy = :actor"
+        ),
+        ConditionExpression=(
+            "attribute_exists(PK) "
+            "AND recordType = :project_type"
+        ),
+        ExpressionAttributeValues={
+            ":now":
+                now,
+            ":actor":
+                actor_subject,
+            ":project_type":
+                "PROJECT",
+        },
     )
 
     return item
