@@ -127,6 +127,30 @@ VENDOR_CATEGORIES = (
     "OTHER",
 )
 
+PROJECT_VENDOR_OPERATIONAL_STATUSES = (
+    "SHORTLISTED",
+    "CONTACTED",
+    "QUOTE_REQUESTED",
+    "QUOTE_RECEIVED",
+    "SELECTED",
+    "CONFIRMED",
+    "COMPLETED",
+    "DECLINED",
+)
+
+PROJECT_VENDOR_BOOKING_STATUSES = (
+    "NOT_STARTED",
+    "PENDING",
+    "CONFIRMED",
+    "CANCELLED",
+)
+
+PROJECT_VENDOR_RELATIONSHIP_STATUSES = (
+    "ACTIVE",
+    "UNLINKED",
+)
+
+
 
 class LeadConversionConflict(RuntimeError):
     pass
@@ -134,6 +158,15 @@ class LeadConversionConflict(RuntimeError):
 
 class VendorWriteConflict(RuntimeError):
     pass
+
+
+class ProjectVendorConflict(RuntimeError):
+    def __init__(
+        self,
+        code: str,
+    ):
+        super().__init__(code)
+        self.code = code
 
 
 _serializer = TypeSerializer()
@@ -8588,6 +8621,1433 @@ def _handle_update_vendor(
     )
 
 
+
+
+def _normalize_project_vendor_operational_status(
+    value: Any,
+) -> str | None:
+    status = (
+        str(value or "")
+        .strip()
+        .upper()
+        .replace(" ", "_")
+        .replace("-", "_")
+    )
+
+    if (
+        status
+        not in
+        PROJECT_VENDOR_OPERATIONAL_STATUSES
+    ):
+        return None
+
+    return status
+
+
+def _normalize_project_vendor_booking_status(
+    value: Any,
+) -> str | None:
+    status = (
+        str(value or "")
+        .strip()
+        .upper()
+        .replace(" ", "_")
+        .replace("-", "_")
+    )
+
+    if (
+        status
+        not in
+        PROJECT_VENDOR_BOOKING_STATUSES
+    ):
+        return None
+
+    return status
+
+
+def _normalize_project_vendor_amount(
+    value: Any,
+) -> int | None:
+    if (
+        value is None
+        or value == ""
+    ):
+        return 0
+
+    if isinstance(value, bool):
+        return None
+
+    if isinstance(value, float):
+        if not value.is_integer():
+            return None
+
+    if isinstance(value, str):
+        raw = value.strip()
+
+        if not raw.isdigit():
+            return None
+
+    try:
+        amount = int(value)
+
+    except (
+        TypeError,
+        ValueError,
+        OverflowError,
+    ):
+        return None
+
+    if (
+        amount < 0
+        or amount > 1_000_000_000_000
+    ):
+        return None
+
+    return amount
+
+
+def _project_vendor_request_fields(
+    body: dict[str, Any],
+    *,
+    partial: bool,
+) -> dict[str, Any]:
+    if not isinstance(body, dict):
+        raise ValueError(
+            "invalid_json"
+        )
+
+    result: dict[str, Any] = {}
+
+    if (
+        not partial
+        or "category" in body
+    ):
+        raw_category = str(
+            body.get("category")
+            or ""
+        ).strip()
+
+        if raw_category:
+            category = (
+                _normalize_vendor_category(
+                    raw_category
+                )
+            )
+
+            if not category:
+                raise ValueError(
+                    "invalid_vendor_category"
+                )
+
+            result["category"] = (
+                category
+            )
+
+    if (
+        not partial
+        or "operationalStatus" in body
+    ):
+        raw_status = (
+            body.get(
+                "operationalStatus"
+            )
+            if "operationalStatus" in body
+            else "SHORTLISTED"
+        )
+
+        status = (
+            _normalize_project_vendor_operational_status(
+                raw_status
+            )
+        )
+
+        if not status:
+            raise ValueError(
+                "invalid_project_vendor_status"
+            )
+
+        result[
+            "operationalStatus"
+        ] = status
+
+    if (
+        not partial
+        or "bookingStatus" in body
+    ):
+        raw_booking = (
+            body.get("bookingStatus")
+            if "bookingStatus" in body
+            else "NOT_STARTED"
+        )
+
+        booking_status = (
+            _normalize_project_vendor_booking_status(
+                raw_booking
+            )
+        )
+
+        if not booking_status:
+            raise ValueError(
+                "invalid_project_vendor_booking_status"
+            )
+
+        result[
+            "bookingStatus"
+        ] = booking_status
+
+    for field in (
+        "quoteAmount",
+        "depositAmount",
+    ):
+        if (
+            partial
+            and field not in body
+        ):
+            continue
+
+        amount = (
+            _normalize_project_vendor_amount(
+                body.get(field)
+            )
+        )
+
+        if amount is None:
+            raise ValueError(
+                f"invalid_{field}"
+            )
+
+        result[field] = amount
+
+    if (
+        not partial
+        or "notes" in body
+    ):
+        notes = str(
+            body.get("notes")
+            or ""
+        ).strip()
+
+        if len(notes) > 8000:
+            raise ValueError(
+                "project_vendor_notes_too_long"
+            )
+
+        result["notes"] = notes
+
+    return result
+
+
+def _public_project_vendor(
+    item: dict[str, Any],
+    vendor: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    return {
+        "projectId": str(
+            item.get("projectId")
+            or ""
+        ),
+        "vendorId": str(
+            item.get("vendorId")
+            or ""
+        ),
+        "relationshipStatus": str(
+            item.get(
+                "relationshipStatus"
+            )
+            or "ACTIVE"
+        ),
+        "category": str(
+            item.get("category")
+            or ""
+        ),
+        "operationalStatus": str(
+            item.get(
+                "operationalStatus"
+            )
+            or "SHORTLISTED"
+        ),
+        "bookingStatus": str(
+            item.get("bookingStatus")
+            or "NOT_STARTED"
+        ),
+        "quoteAmount": int(
+            item.get("quoteAmount")
+            or 0
+        ),
+        "depositAmount": int(
+            item.get("depositAmount")
+            or 0
+        ),
+        "notes": str(
+            item.get("notes")
+            or ""
+        ),
+        "linkedAt": str(
+            item.get("linkedAt")
+            or ""
+        ),
+        "linkedBy": str(
+            item.get("linkedBy")
+            or ""
+        ),
+        "unlinkedAt": str(
+            item.get("unlinkedAt")
+            or ""
+        ),
+        "unlinkedBy": str(
+            item.get("unlinkedBy")
+            or ""
+        ),
+        "createdAt": str(
+            item.get("createdAt")
+            or ""
+        ),
+        "createdBy": str(
+            item.get("createdBy")
+            or ""
+        ),
+        "updatedAt": str(
+            item.get("updatedAt")
+            or ""
+        ),
+        "updatedBy": str(
+            item.get("updatedBy")
+            or ""
+        ),
+        "vendor": (
+            _public_vendor(vendor)
+            if vendor
+            else None
+        ),
+    }
+
+
+def _project_vendor_record(
+    project_id: str,
+    vendor_id: str,
+) -> dict[str, Any] | None:
+    response = _ops_table().get_item(
+        Key={
+            "PK":
+                f"PROJECT#{project_id}",
+            "SK":
+                f"VENDOR#{vendor_id}",
+        },
+        ConsistentRead=True,
+    )
+
+    item = response.get("Item")
+
+    if (
+        not isinstance(item, dict)
+        or item.get("recordType")
+            != "PROJECT_VENDOR"
+    ):
+        return None
+
+    return item
+
+
+def _list_project_vendors(
+    project_id: str,
+) -> list[dict[str, Any]]:
+    response = _ops_table().query(
+        KeyConditionExpression=(
+            "PK = :pk AND "
+            "begins_with(SK, :prefix)"
+        ),
+        ExpressionAttributeValues={
+            ":pk":
+                f"PROJECT#{project_id}",
+            ":prefix":
+                "VENDOR#",
+        },
+        ConsistentRead=True,
+    )
+
+    result = []
+
+    for item in (
+        response.get("Items")
+        or []
+    ):
+        if (
+            not isinstance(item, dict)
+            or item.get("recordType")
+                != "PROJECT_VENDOR"
+            or item.get(
+                "relationshipStatus"
+            )
+                != "ACTIVE"
+        ):
+            continue
+
+        vendor_id = str(
+            item.get("vendorId")
+            or ""
+        )
+
+        vendor = (
+            _vendor_record(vendor_id)
+            if vendor_id
+            else None
+        )
+
+        result.append(
+            _public_project_vendor(
+                item,
+                vendor,
+            )
+        )
+
+    return sorted(
+        result,
+        key=lambda item: (
+            item["category"],
+            (
+                item.get("vendor")
+                or {}
+            ).get(
+                "name",
+                "",
+            ).casefold(),
+            item["vendorId"],
+        ),
+    )
+
+
+def _project_vendor_audit_item(
+    project_id: str,
+    vendor_id: str,
+    *,
+    action: str,
+    actor_subject: str,
+    before: dict[str, Any] | None,
+    after: dict[str, Any],
+    changed_fields: list[str],
+    now: str,
+) -> dict[str, Any]:
+    audit_id = _new_record_id(
+        "AUD"
+    )
+
+    return {
+        "PK":
+            f"PROJECT#{project_id}",
+        "SK":
+            (
+                f"VENDOR_AUDIT#{now}"
+                f"#{audit_id}"
+            ),
+        "recordType":
+            "PROJECT_VENDOR_AUDIT",
+        "auditId":
+            audit_id,
+        "projectId":
+            project_id,
+        "vendorId":
+            vendor_id,
+        "action":
+            action,
+        "actorUserId":
+            actor_subject,
+        "changedFields":
+            changed_fields,
+        "before":
+            before or {},
+        "after":
+            after,
+        "createdAt":
+            now,
+    }
+
+
+def _write_project_vendor_transaction(
+    item: dict[str, Any],
+    *,
+    action: str,
+    actor_subject: str,
+    before: dict[str, Any] | None,
+    changed_fields: list[str],
+    condition_expression: str,
+    condition_values:
+        dict[str, Any] | None = None,
+) -> None:
+    project_id = str(
+        item.get("projectId")
+        or ""
+    )
+
+    vendor_id = str(
+        item.get("vendorId")
+        or ""
+    )
+
+    now = str(
+        item.get("updatedAt")
+        or _utcnow()
+    )
+
+    audit = (
+        _project_vendor_audit_item(
+            project_id,
+            vendor_id,
+            action=action,
+            actor_subject=
+                actor_subject,
+            before=before,
+            after=
+                _public_project_vendor(
+                    item
+                ),
+            changed_fields=
+                changed_fields,
+            now=now,
+        )
+    )
+
+    relation_put = {
+        "TableName":
+            OPS_TABLE_NAME,
+        "Item":
+            _serialize_map(item),
+        "ConditionExpression":
+            condition_expression,
+    }
+
+    if condition_values:
+        relation_put[
+            "ExpressionAttributeValues"
+        ] = _serialize_map(
+            condition_values
+        )
+
+    try:
+        boto3.client(
+            "dynamodb"
+        ).transact_write_items(
+            TransactItems=[
+                {
+                    "Put":
+                        relation_put
+                },
+                {
+                    "Put": {
+                        "TableName":
+                            OPS_TABLE_NAME,
+                        "Item":
+                            _serialize_map(
+                                audit
+                            ),
+                        "ConditionExpression": (
+                            "attribute_not_exists("
+                            "PK) AND "
+                            "attribute_not_exists("
+                            "SK)"
+                        ),
+                    }
+                },
+            ]
+        )
+
+    except ClientError as exc:
+        if (
+            _aws_error_code(exc)
+            ==
+            "TransactionCanceledException"
+        ):
+            raise ProjectVendorConflict(
+                "project_vendor_changed_refresh"
+            ) from exc
+
+        raise
+
+
+def _link_project_vendor(
+    project_id: str,
+    vendor_id: str,
+    fields: dict[str, Any],
+    actor_subject: str,
+) -> tuple[
+    dict[str, Any],
+    bool,
+]:
+    existing = (
+        _project_vendor_record(
+            project_id,
+            vendor_id,
+        )
+    )
+
+    if (
+        existing
+        and existing.get(
+            "relationshipStatus"
+        )
+        == "ACTIVE"
+    ):
+        raise ProjectVendorConflict(
+            "project_vendor_already_linked"
+        )
+
+    now = _utcnow()
+
+    item = {
+        "PK":
+            f"PROJECT#{project_id}",
+        "SK":
+            f"VENDOR#{vendor_id}",
+        "recordType":
+            "PROJECT_VENDOR",
+        "projectId":
+            project_id,
+        "vendorId":
+            vendor_id,
+        "relationshipStatus":
+            "ACTIVE",
+        **fields,
+        "linkedAt":
+            now,
+        "linkedBy":
+            actor_subject,
+        "createdAt":
+            (
+                str(
+                    existing.get(
+                        "createdAt"
+                    )
+                    or now
+                )
+                if existing
+                else now
+            ),
+        "createdBy":
+            (
+                str(
+                    existing.get(
+                        "createdBy"
+                    )
+                    or actor_subject
+                )
+                if existing
+                else actor_subject
+            ),
+        "updatedAt":
+            now,
+        "updatedBy":
+            actor_subject,
+    }
+
+    if existing:
+        condition_expression = (
+            "recordType = "
+            ":relation_type AND "
+            "updatedAt = "
+            ":expected_updated"
+        )
+
+        condition_values = {
+            ":relation_type":
+                "PROJECT_VENDOR",
+            ":expected_updated":
+                str(
+                    existing.get(
+                        "updatedAt"
+                    )
+                    or ""
+                ),
+        }
+
+    else:
+        condition_expression = (
+            "attribute_not_exists(PK)"
+        )
+
+        condition_values = None
+
+    _write_project_vendor_transaction(
+        item,
+        action="PROJECT_VENDOR_LINKED",
+        actor_subject=actor_subject,
+        before=(
+            _public_project_vendor(
+                existing
+            )
+            if existing
+            else None
+        ),
+        changed_fields=[
+            "relationshipStatus",
+            "category",
+            "operationalStatus",
+            "bookingStatus",
+            "quoteAmount",
+            "depositAmount",
+            "notes",
+        ],
+        condition_expression=
+            condition_expression,
+        condition_values=
+            condition_values,
+    )
+
+    return item, existing is None
+
+
+def _update_project_vendor(
+    current: dict[str, Any],
+    changes: dict[str, Any],
+    actor_subject: str,
+) -> tuple[
+    dict[str, Any],
+    bool,
+]:
+    changed_fields = [
+        field
+        for field, value
+        in changes.items()
+        if current.get(field) != value
+    ]
+
+    if not changed_fields:
+        return current, False
+
+    now = _utcnow()
+
+    updated = {
+        **current,
+        **changes,
+        "updatedAt":
+            now,
+        "updatedBy":
+            actor_subject,
+    }
+
+    _write_project_vendor_transaction(
+        updated,
+        action="PROJECT_VENDOR_UPDATED",
+        actor_subject=actor_subject,
+        before=
+            _public_project_vendor(
+                current
+            ),
+        changed_fields=
+            sorted(changed_fields),
+        condition_expression=(
+            "recordType = "
+            ":relation_type AND "
+            "relationshipStatus = "
+            ":active AND "
+            "updatedAt = "
+            ":expected_updated"
+        ),
+        condition_values={
+            ":relation_type":
+                "PROJECT_VENDOR",
+            ":active":
+                "ACTIVE",
+            ":expected_updated":
+                str(
+                    current.get(
+                        "updatedAt"
+                    )
+                    or ""
+                ),
+        },
+    )
+
+    return updated, True
+
+
+def _unlink_project_vendor(
+    current: dict[str, Any],
+    actor_subject: str,
+) -> tuple[
+    dict[str, Any],
+    bool,
+]:
+    if (
+        current.get(
+            "relationshipStatus"
+        )
+        == "UNLINKED"
+    ):
+        return current, False
+
+    now = _utcnow()
+
+    updated = {
+        **current,
+        "relationshipStatus":
+            "UNLINKED",
+        "unlinkedAt":
+            now,
+        "unlinkedBy":
+            actor_subject,
+        "updatedAt":
+            now,
+        "updatedBy":
+            actor_subject,
+    }
+
+    _write_project_vendor_transaction(
+        updated,
+        action="PROJECT_VENDOR_UNLINKED",
+        actor_subject=actor_subject,
+        before=
+            _public_project_vendor(
+                current
+            ),
+        changed_fields=[
+            "relationshipStatus",
+        ],
+        condition_expression=(
+            "recordType = "
+            ":relation_type AND "
+            "relationshipStatus = "
+            ":active AND "
+            "updatedAt = "
+            ":expected_updated"
+        ),
+        condition_values={
+            ":relation_type":
+                "PROJECT_VENDOR",
+            ":active":
+                "ACTIVE",
+            ":expected_updated":
+                str(
+                    current.get(
+                        "updatedAt"
+                    )
+                    or ""
+                ),
+        },
+    )
+
+    return updated, True
+
+
+def _project_vendor_project_id(
+    event: dict[str, Any],
+) -> str:
+    parameters = (
+        event.get("pathParameters")
+        or {}
+    )
+
+    return str(
+        parameters.get("projectId")
+        or ""
+    ).strip().upper()
+
+
+def _project_vendor_vendor_id(
+    event: dict[str, Any],
+) -> str:
+    parameters = (
+        event.get("pathParameters")
+        or {}
+    )
+
+    return str(
+        parameters.get("vendorId")
+        or ""
+    ).strip().upper()
+
+
+def _project_vendor_write_access_error(
+    event: dict[str, Any],
+    identity: dict[str, Any],
+):
+    project_id = (
+        _project_vendor_project_id(
+            event
+        )
+    )
+
+    if not project_id:
+        return _response(
+            400,
+            {
+                "error":
+                    "project_id_required"
+            },
+        )
+
+    try:
+        project = _project_record(
+            project_id
+        )
+
+    except (
+        BotoCoreError,
+        ClientError,
+        RuntimeError,
+    ):
+        LOGGER.exception(
+            "Failed to authorize "
+            "project vendor write"
+        )
+
+        return _response(
+            503,
+            {
+                "error":
+                    "temporarily_unavailable"
+            },
+        )
+
+    if not project:
+        return _response(
+            404,
+            {
+                "error":
+                    "project_not_found"
+            },
+        )
+
+    if identity["role"] in {
+        "OWNER",
+        "MANAGER",
+    }:
+        return None
+
+    if not _can_view_project(
+        identity,
+        project,
+    ):
+        return _response(
+            403,
+            {
+                "error":
+                    "project_access_required"
+            },
+        )
+
+    if (
+        str(
+            project.get("status")
+            or "ACTIVE"
+        )
+        != "ACTIVE"
+    ):
+        return _response(
+            409,
+            {
+                "error":
+                    "project_not_active"
+            },
+        )
+
+    subject = str(
+        identity.get("subject")
+        or ""
+    )
+
+    membership = (
+        _project_member_record(
+            project_id,
+            subject,
+        )
+    )
+
+    if (
+        not membership
+        or membership.get(
+            "membershipStatus"
+        )
+        != "ACTIVE"
+        or membership.get(
+            "projectRole"
+        )
+        == "VIEWER"
+    ):
+        return _response(
+            403,
+            {
+                "error":
+                    "project_write_access_required"
+            },
+        )
+
+    return None
+
+
+def _handle_list_project_vendors(
+    event: dict[str, Any],
+):
+    project_id = (
+        _project_vendor_project_id(
+            event
+        )
+    )
+
+    if not project_id:
+        return _response(
+            400,
+            {
+                "error":
+                    "project_id_required"
+            },
+        )
+
+    try:
+        items = (
+            _list_project_vendors(
+                project_id
+            )
+        )
+
+    except (
+        BotoCoreError,
+        ClientError,
+        RuntimeError,
+    ):
+        LOGGER.exception(
+            "Failed to list project vendors"
+        )
+
+        return _response(
+            503,
+            {
+                "error":
+                    "temporarily_unavailable"
+            },
+        )
+
+    return _response(
+        200,
+        {
+            "items":
+                items,
+            "count":
+                len(items),
+        },
+    )
+
+
+def _handle_link_project_vendor(
+    event: dict[str, Any],
+    identity: dict[str, Any],
+):
+    project_id = (
+        _project_vendor_project_id(
+            event
+        )
+    )
+
+    body = _request_body(event)
+
+    if body is None:
+        return _response(
+            400,
+            {
+                "error":
+                    "invalid_json"
+            },
+        )
+
+    vendor_id = str(
+        body.get("vendorId")
+        or ""
+    ).strip().upper()
+
+    if not vendor_id.startswith(
+        "VEN-"
+    ):
+        return _response(
+            400,
+            {
+                "error":
+                    "vendor_id_required"
+            },
+        )
+
+    try:
+        fields = (
+            _project_vendor_request_fields(
+                body,
+                partial=False,
+            )
+        )
+
+    except ValueError as exc:
+        return _response(
+            400,
+            {
+                "error":
+                    str(exc)
+            },
+        )
+
+    try:
+        vendor = _vendor_record(
+            vendor_id
+        )
+
+        if not vendor:
+            return _response(
+                404,
+                {
+                    "error":
+                        "vendor_not_found"
+                },
+            )
+
+        if (
+            str(
+                vendor.get("status")
+                or "ACTIVE"
+            )
+            not in {
+                "ACTIVE",
+                "PREFERRED",
+            }
+        ):
+            return _response(
+                409,
+                {
+                    "error":
+                        "vendor_unavailable"
+                },
+            )
+
+        if not fields.get(
+            "category"
+        ):
+            fields["category"] = str(
+                vendor.get("category")
+                or "OTHER"
+            )
+
+        relationship, _ = (
+            _link_project_vendor(
+                project_id,
+                vendor_id,
+                fields,
+                identity["subject"],
+            )
+        )
+
+        _record_activity(
+            project_id,
+            identity["subject"],
+            "PROJECT_VENDOR_LINKED",
+            (
+                "Linked vendor: "
+                f"{vendor.get('name') or vendor_id}"
+            ),
+            {
+                "vendorId":
+                    vendor_id,
+                "category":
+                    relationship[
+                        "category"
+                    ],
+            },
+        )
+
+    except ProjectVendorConflict as exc:
+        return _response(
+            409,
+            {
+                "error":
+                    exc.code
+            },
+        )
+
+    except (
+        BotoCoreError,
+        ClientError,
+        RuntimeError,
+    ):
+        LOGGER.exception(
+            "Failed to link project vendor"
+        )
+
+        return _response(
+            503,
+            {
+                "error":
+                    "temporarily_unavailable"
+            },
+        )
+
+    return _response(
+        201,
+        {
+            "projectVendor":
+                _public_project_vendor(
+                    relationship,
+                    vendor,
+                )
+        },
+    )
+
+
+def _handle_update_project_vendor(
+    event: dict[str, Any],
+    identity: dict[str, Any],
+):
+    project_id = (
+        _project_vendor_project_id(
+            event
+        )
+    )
+
+    vendor_id = (
+        _project_vendor_vendor_id(
+            event
+        )
+    )
+
+    if not vendor_id.startswith(
+        "VEN-"
+    ):
+        return _response(
+            400,
+            {
+                "error":
+                    "vendor_id_required"
+            },
+        )
+
+    body = _request_body(event)
+
+    if body is None:
+        return _response(
+            400,
+            {
+                "error":
+                    "invalid_json"
+            },
+        )
+
+    try:
+        changes = (
+            _project_vendor_request_fields(
+                body,
+                partial=True,
+            )
+        )
+
+    except ValueError as exc:
+        return _response(
+            400,
+            {
+                "error":
+                    str(exc)
+            },
+        )
+
+    try:
+        current = (
+            _project_vendor_record(
+                project_id,
+                vendor_id,
+            )
+        )
+
+        if (
+            not current
+            or current.get(
+                "relationshipStatus"
+            )
+            != "ACTIVE"
+        ):
+            return _response(
+                404,
+                {
+                    "error":
+                        "project_vendor_not_found"
+                },
+            )
+
+        updated, changed = (
+            _update_project_vendor(
+                current,
+                changes,
+                identity["subject"],
+            )
+        )
+
+        vendor = _vendor_record(
+            vendor_id
+        )
+
+        if changed:
+            _record_activity(
+                project_id,
+                identity["subject"],
+                "PROJECT_VENDOR_UPDATED",
+                (
+                    "Updated vendor: "
+                    f"{(
+                        vendor or {}
+                    ).get('name') or vendor_id}"
+                ),
+                {
+                    "vendorId":
+                        vendor_id,
+                    "changedFields":
+                        sorted(
+                            changes.keys()
+                        ),
+                },
+            )
+
+    except ProjectVendorConflict as exc:
+        return _response(
+            409,
+            {
+                "error":
+                    exc.code
+            },
+        )
+
+    except (
+        BotoCoreError,
+        ClientError,
+        RuntimeError,
+    ):
+        LOGGER.exception(
+            "Failed to update project vendor"
+        )
+
+        return _response(
+            503,
+            {
+                "error":
+                    "temporarily_unavailable"
+            },
+        )
+
+    return _response(
+        200,
+        {
+            "projectVendor":
+                _public_project_vendor(
+                    updated,
+                    vendor,
+                ),
+            "changed":
+                changed,
+        },
+    )
+
+
+def _handle_unlink_project_vendor(
+    event: dict[str, Any],
+    identity: dict[str, Any],
+):
+    project_id = (
+        _project_vendor_project_id(
+            event
+        )
+    )
+
+    vendor_id = (
+        _project_vendor_vendor_id(
+            event
+        )
+    )
+
+    if not vendor_id.startswith(
+        "VEN-"
+    ):
+        return _response(
+            400,
+            {
+                "error":
+                    "vendor_id_required"
+            },
+        )
+
+    try:
+        current = (
+            _project_vendor_record(
+                project_id,
+                vendor_id,
+            )
+        )
+
+        if not current:
+            return _response(
+                404,
+                {
+                    "error":
+                        "project_vendor_not_found"
+                },
+            )
+
+        updated, changed = (
+            _unlink_project_vendor(
+                current,
+                identity["subject"],
+            )
+        )
+
+        vendor = _vendor_record(
+            vendor_id
+        )
+
+        if changed:
+            _record_activity(
+                project_id,
+                identity["subject"],
+                "PROJECT_VENDOR_UNLINKED",
+                (
+                    "Unlinked vendor: "
+                    f"{(
+                        vendor or {}
+                    ).get('name') or vendor_id}"
+                ),
+                {
+                    "vendorId":
+                        vendor_id,
+                },
+            )
+
+    except ProjectVendorConflict as exc:
+        return _response(
+            409,
+            {
+                "error":
+                    exc.code
+            },
+        )
+
+    except (
+        BotoCoreError,
+        ClientError,
+        RuntimeError,
+    ):
+        LOGGER.exception(
+            "Failed to unlink project vendor"
+        )
+
+        return _response(
+            503,
+            {
+                "error":
+                    "temporarily_unavailable"
+            },
+        )
+
+    return _response(
+        200,
+        {
+            "projectVendor":
+                _public_project_vendor(
+                    updated,
+                    vendor,
+                ),
+            "changed":
+                changed,
+        },
+    )
+
+
 def handler(
     event: dict[str, Any],
     context: Any,
@@ -8781,6 +10241,85 @@ def handler(
             )
 
         return _handle_list_follow_ups()
+
+    if (
+        method == "GET"
+        and path.endswith("/vendors")
+        and "/v1/admin/projects/" in path
+    ):
+        access_error = (
+            _project_read_access_error(
+                event,
+                identity,
+            )
+        )
+
+        if access_error:
+            return access_error
+
+        return _handle_list_project_vendors(
+            event
+        )
+
+    if (
+        method == "POST"
+        and path.endswith("/vendors")
+        and "/v1/admin/projects/" in path
+    ):
+        access_error = (
+            _project_vendor_write_access_error(
+                event,
+                identity,
+            )
+        )
+
+        if access_error:
+            return access_error
+
+        return _handle_link_project_vendor(
+            event,
+            identity,
+        )
+
+    if (
+        method == "PATCH"
+        and "/vendors/" in path
+        and "/v1/admin/projects/" in path
+    ):
+        access_error = (
+            _project_vendor_write_access_error(
+                event,
+                identity,
+            )
+        )
+
+        if access_error:
+            return access_error
+
+        return _handle_update_project_vendor(
+            event,
+            identity,
+        )
+
+    if (
+        method == "DELETE"
+        and "/vendors/" in path
+        and "/v1/admin/projects/" in path
+    ):
+        access_error = (
+            _project_vendor_write_access_error(
+                event,
+                identity,
+            )
+        )
+
+        if access_error:
+            return access_error
+
+        return _handle_unlink_project_vendor(
+            event,
+            identity,
+        )
 
     if (
         method == "GET"
