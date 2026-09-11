@@ -26,6 +26,11 @@ STAFF_USER_POOL_ID = os.environ.get(
     "",
 )
 
+CLIENT_USER_POOL_ID = os.environ.get(
+    "CLIENT_USER_POOL_ID",
+    "",
+)
+
 PREVIEW_TOKEN_SECRET_ARN = os.environ.get(
     "PREVIEW_TOKEN_SECRET_ARN",
     "",
@@ -190,6 +195,7 @@ _serializer = TypeSerializer()
 _ops_table_instance = None
 _leads_table_instance = None
 _cognito_client_instance = None
+_client_cognito_client_instance = None
 
 
 def _response(
@@ -4542,6 +4548,27 @@ def _cognito():
     return _cognito_client_instance
 
 
+def _client_cognito():
+    global _client_cognito_client_instance
+
+    if not CLIENT_USER_POOL_ID:
+        raise RuntimeError(
+            "client_user_pool_not_configured"
+        )
+
+    if (
+        _client_cognito_client_instance
+        is None
+    ):
+        _client_cognito_client_instance = (
+            boto3.client("cognito-idp")
+        )
+
+    return (
+        _client_cognito_client_instance
+    )
+
+
 def _staff_record(
     subject: str,
 ) -> dict[str, Any] | None:
@@ -5943,6 +5970,291 @@ def _handle_convert_lead(
             "project":
                 _public_project(project),
             "created": created,
+        },
+    )
+
+
+def _ensure_client_portal_user(
+    email: str,
+) -> bool:
+    client = _client_cognito()
+
+    try:
+        existing = client.admin_get_user(
+            UserPoolId=
+                CLIENT_USER_POOL_ID,
+            Username=email,
+        )
+
+        if not existing.get(
+            "Enabled",
+            True,
+        ):
+            client.admin_enable_user(
+                UserPoolId=
+                    CLIENT_USER_POOL_ID,
+                Username=email,
+            )
+
+        return False
+
+    except ClientError as exc:
+        if (
+            _aws_error_code(exc)
+            != "UserNotFoundException"
+        ):
+            raise
+
+    try:
+        client.admin_create_user(
+            UserPoolId=
+                CLIENT_USER_POOL_ID,
+            Username=email,
+            UserAttributes=[
+                {
+                    "Name": "email",
+                    "Value": email,
+                },
+                {
+                    "Name":
+                        "email_verified",
+                    "Value": "true",
+                },
+            ],
+            MessageAction="SUPPRESS",
+        )
+
+        return True
+
+    except ClientError as exc:
+        if (
+            _aws_error_code(exc)
+            not in {
+                "UsernameExistsException",
+                "AliasExistsException",
+            }
+        ):
+            raise
+
+        # Safe retry if another request created
+        # the same portal identity first.
+        client.admin_get_user(
+            UserPoolId=
+                CLIENT_USER_POOL_ID,
+            Username=email,
+        )
+
+        return False
+
+
+def _activate_client_project_access(
+    project: dict[str, Any],
+    email: str,
+    actor_subject: str,
+) -> dict[str, Any]:
+    project_id = str(
+        project.get("projectId")
+        or ""
+    ).strip()
+
+    now = _utcnow()
+
+    response = _ops_table().update_item(
+        Key={
+            "PK":
+                _client_access_partition_key(
+                    email
+                ),
+            "SK":
+                f"PROJECT#{project_id}",
+        },
+        UpdateExpression=(
+            "SET "
+            "recordType = :record_type, "
+            "projectId = :project_id, "
+            "clientEmail = :email, "
+            "leadReference = :lead_reference, "
+            "#status = :active, "
+            "createdAt = if_not_exists("
+            "createdAt, :now), "
+            "createdBy = if_not_exists("
+            "createdBy, :actor), "
+            "updatedAt = :now, "
+            "updatedBy = :actor"
+        ),
+        ExpressionAttributeNames={
+            "#status": "status",
+        },
+        ExpressionAttributeValues={
+            ":record_type":
+                "CLIENT_PROJECT_ACCESS",
+            ":project_id":
+                project_id,
+            ":email":
+                email,
+            ":lead_reference":
+                str(
+                    project.get(
+                        "leadReference"
+                    )
+                    or ""
+                ),
+            ":active":
+                "ACTIVE",
+            ":now":
+                now,
+            ":actor":
+                actor_subject,
+        },
+        ReturnValues="ALL_NEW",
+    )
+
+    return response["Attributes"]
+
+
+def _invite_client_to_project(
+    project: dict[str, Any],
+    actor_subject: str,
+) -> tuple[
+    dict[str, Any],
+    bool,
+]:
+    email = _normalize_email(
+        project.get("email")
+    )
+
+    if not email:
+        raise ValueError(
+            "client_email_required"
+        )
+
+    user_created = (
+        _ensure_client_portal_user(
+            email
+        )
+    )
+
+    access = (
+        _activate_client_project_access(
+            project,
+            email,
+            actor_subject,
+        )
+    )
+
+    _record_activity(
+        str(
+            project.get("projectId")
+            or ""
+        ),
+        actor_subject,
+        "CLIENT_PORTAL_ACCESS_ENABLED",
+        "Enabled client portal access",
+        {
+            "clientEmail": email,
+            "clientUserCreated":
+                user_created,
+        },
+    )
+
+    return access, user_created
+
+
+def _handle_enable_client_portal_access(
+    event: dict[str, Any],
+    identity: dict[str, Any],
+):
+    parameters = (
+        event.get("pathParameters")
+        or {}
+    )
+
+    project_id = str(
+        parameters.get("projectId")
+        or ""
+    ).strip()
+
+    if not project_id:
+        return _response(
+            400,
+            {
+                "error":
+                    "project_id_required"
+            },
+        )
+
+    try:
+        project = _project_record(
+            project_id
+        )
+
+        if not project:
+            return _response(
+                404,
+                {
+                    "error":
+                        "project_not_found"
+                },
+            )
+
+        access, user_created = (
+            _invite_client_to_project(
+                project,
+                identity["subject"],
+            )
+        )
+
+    except ValueError as exc:
+        return _response(
+            409,
+            {"error": str(exc)},
+        )
+
+    except (
+        BotoCoreError,
+        ClientError,
+        RuntimeError,
+    ):
+        LOGGER.exception(
+            "Client portal access enable failed"
+        )
+
+        return _response(
+            503,
+            {
+                "error":
+                    "temporarily_unavailable"
+            },
+        )
+
+    return _response(
+        201 if user_created else 200,
+        {
+            "clientAccess": {
+                "projectId":
+                    str(
+                        access.get(
+                            "projectId"
+                        )
+                        or ""
+                    ),
+                "email":
+                    str(
+                        access.get(
+                            "clientEmail"
+                        )
+                        or ""
+                    ),
+                "status":
+                    str(
+                        access.get(
+                            "status"
+                        )
+                        or ""
+                    ),
+            },
+            "clientUserCreated":
+                user_created,
         },
     )
 
@@ -11377,6 +11689,32 @@ def handler(
         return _handle_unassign_project_member(
             event,
             identity["subject"],
+        )
+
+    if (
+        method == "POST"
+        and path.endswith(
+            "/client-access"
+        )
+        and "/v1/admin/projects/" in path
+    ):
+        if identity["role"] not in {
+            "OWNER",
+            "MANAGER",
+        }:
+            return _response(
+                403,
+                {
+                    "error":
+                        "manager_or_owner_required"
+                },
+            )
+
+        return (
+            _handle_enable_client_portal_access(
+                event,
+                identity,
+            )
         )
 
     if (

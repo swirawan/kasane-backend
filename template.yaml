@@ -428,6 +428,7 @@ Resources:
           OPS_TABLE_NAME: !Ref OpsTable
           LEADS_TABLE_NAME: !Ref LeadsTable
           STAFF_USER_POOL_ID: !Ref StaffUserPool
+          CLIENT_USER_POOL_ID: !Ref ClientUserPool
           STAGE: !Ref StageName
           PREVIEW_TOKEN_SECRET_ARN: !Ref PreviewTokenSecretArn
           PREVIEW_BASE_URL: !Ref PreviewBaseUrl
@@ -451,6 +452,14 @@ Resources:
                 - cognito-idp:AdminEnableUser
                 - cognito-idp:AdminUserGlobalSignOut
               Resource: !GetAtt StaffUserPool.Arn
+
+        - Statement:
+            - Effect: Allow
+              Action:
+                - cognito-idp:AdminCreateUser
+                - cognito-idp:AdminGetUser
+                - cognito-idp:AdminEnableUser
+              Resource: !GetAtt ClientUserPool.Arn
 
         - Statement:
             - Effect: Allow
@@ -538,6 +547,13 @@ Resources:
             ApiId: !Ref AdminApi
             Path: /v1/admin/projects/{projectId}/scope
             Method: PATCH
+
+        EnableClientPortalAccess:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref AdminApi
+            Path: /v1/admin/projects/{projectId}/client-access
+            Method: POST
 
         CompleteProject:
           Type: HttpApi

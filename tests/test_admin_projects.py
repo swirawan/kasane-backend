@@ -2054,3 +2054,226 @@ def test_conversion_without_email_skips_client_access():
         "CLIENT_PROJECT_ACCESS"
         not in record_types
     )
+
+
+
+# PHASE 7 CLIENT PORTAL ADMIN ACCESS
+
+def test_owner_can_enable_client_portal_access():
+    item = project()
+    item["email"] = "alya@example.com"
+
+    access = {
+        "projectId": "KAS-001",
+        "clientEmail":
+            "alya@example.com",
+        "status": "ACTIVE",
+    }
+
+    with patch.object(
+        admin_app,
+        "_authorize_identity",
+        return_value=(
+            identity("OWNER"),
+            None,
+        ),
+    ), patch.object(
+        admin_app,
+        "_project_record",
+        return_value=item,
+    ), patch.object(
+        admin_app,
+        "_invite_client_to_project",
+        return_value=(
+            access,
+            True,
+        ),
+    ):
+        response = admin_app.handler(
+            event(
+                "POST",
+                "/v1/admin/projects/"
+                "KAS-001/client-access",
+                project_id="KAS-001",
+            ),
+            None,
+        )
+
+    assert response["statusCode"] == 201
+
+    result = body(response)
+
+    assert (
+        result["clientAccess"]["email"]
+        == "alya@example.com"
+    )
+
+    assert (
+        result["clientAccess"]["status"]
+        == "ACTIVE"
+    )
+
+    assert (
+        result["clientUserCreated"]
+        is True
+    )
+
+
+def test_worker_cannot_enable_client_portal_access():
+    with patch.object(
+        admin_app,
+        "_authorize_identity",
+        return_value=(
+            identity("WORKER"),
+            None,
+        ),
+    ):
+        response = admin_app.handler(
+            event(
+                "POST",
+                "/v1/admin/projects/"
+                "KAS-001/client-access",
+                project_id="KAS-001",
+            ),
+            None,
+        )
+
+    assert response["statusCode"] == 403
+
+
+def test_client_portal_access_requires_project_email():
+    item = project()
+    item["email"] = ""
+
+    with patch.object(
+        admin_app,
+        "_authorize_identity",
+        return_value=(
+            identity("OWNER"),
+            None,
+        ),
+    ), patch.object(
+        admin_app,
+        "_project_record",
+        return_value=item,
+    ):
+        response = admin_app.handler(
+            event(
+                "POST",
+                "/v1/admin/projects/"
+                "KAS-001/client-access",
+                project_id="KAS-001",
+            ),
+            None,
+        )
+
+    assert response["statusCode"] == 409
+
+    assert (
+        body(response)["error"]
+        == "client_email_required"
+    )
+
+
+def test_client_portal_user_is_passwordless():
+    item = project()
+    item["email"] = "Alya@Example.COM"
+
+    client = type(
+        "Client",
+        (),
+        {},
+    )()
+
+    not_found = admin_app.ClientError(
+        {
+            "Error": {
+                "Code":
+                    "UserNotFoundException",
+                "Message":
+                    "Not found",
+            },
+        },
+        "AdminGetUser",
+    )
+
+    from unittest.mock import Mock
+
+    client.admin_get_user = Mock(
+        side_effect=not_found
+    )
+
+    client.admin_create_user = Mock(
+        return_value={
+            "User": {
+                "Username":
+                    "client-user-1"
+            }
+        }
+    )
+
+    table = Mock()
+
+    table.update_item.return_value = {
+        "Attributes": {
+            "projectId":
+                "KAS-001",
+            "clientEmail":
+                "alya@example.com",
+            "status":
+                "ACTIVE",
+        }
+    }
+
+    with patch.object(
+        admin_app,
+        "_client_cognito",
+        return_value=client,
+    ), patch.object(
+        admin_app,
+        "_ops_table",
+        return_value=table,
+    ), patch.object(
+        admin_app,
+        "_utcnow",
+        return_value=(
+            "2026-09-11T14:00:00+00:00"
+        ),
+    ), patch.object(
+        admin_app,
+        "_record_activity",
+    ):
+        access, created = (
+            admin_app
+            ._invite_client_to_project(
+                item,
+                "user-1",
+            )
+        )
+
+    assert created is True
+
+    kwargs = (
+        client.admin_create_user
+        .call_args.kwargs
+    )
+
+    assert (
+        kwargs["MessageAction"]
+        == "SUPPRESS"
+    )
+
+    assert (
+        "TemporaryPassword"
+        not in kwargs
+    )
+
+    assert (
+        kwargs["Username"]
+        == "alya@example.com"
+    )
+
+    assert (
+        access["status"]
+        == "ACTIVE"
+    )
