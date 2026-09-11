@@ -813,6 +813,7 @@ Resources:
       Policies:
         SignInPolicy:
           AllowedFirstAuthFactors:
+            - PASSWORD
             - EMAIL_OTP
 
       MfaConfiguration: OFF
