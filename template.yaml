@@ -548,34 +548,6 @@ Resources:
             Path: /v1/admin/projects/{projectId}/scope
             Method: PATCH
 
-        GetProjectPortalShare:
-          Type: HttpApi
-          Properties:
-            ApiId: !Ref AdminApi
-            Path: /v1/admin/projects/{projectId}/portal-share
-            Method: GET
-
-        EnableProjectPortalShare:
-          Type: HttpApi
-          Properties:
-            ApiId: !Ref AdminApi
-            Path: /v1/admin/projects/{projectId}/portal-share
-            Method: POST
-
-        RegenerateProjectPortalShare:
-          Type: HttpApi
-          Properties:
-            ApiId: !Ref AdminApi
-            Path: /v1/admin/projects/{projectId}/portal-share/regenerate
-            Method: POST
-
-        DisableProjectPortalShare:
-          Type: HttpApi
-          Properties:
-            ApiId: !Ref AdminApi
-            Path: /v1/admin/projects/{projectId}/portal-share
-            Method: DELETE
-
         EnableClientPortalAccess:
           Type: HttpApi
           Properties:
@@ -820,6 +792,66 @@ Resources:
             ApiId: !Ref AdminApi
             Path: /v1/admin/staff/{userId}/status
             Method: PATCH
+
+
+  # ========================================================
+  # PHASE 7 — CLIENT PORTAL STAFF MANAGEMENT
+  #
+  # Kept separate from AdminFunction because the main admin
+  # Lambda resource policy is already near AWS's 20 KB limit.
+  # ========================================================
+
+  ClientPortalAdminFunction:
+    Type: AWS::Serverless::Function
+
+    Properties:
+      CodeUri: admin/
+      Handler: app.handler
+      Description: KASANE authenticated staff API for client portal management.
+      Timeout: 5
+
+      Environment:
+        Variables:
+          OPS_TABLE_NAME: !Ref OpsTable
+          LEADS_TABLE_NAME: !Ref LeadsTable
+          STAFF_USER_POOL_ID: !Ref StaffUserPool
+          CLIENT_USER_POOL_ID: !Ref ClientUserPool
+          STAGE: !Ref StageName
+          PREVIEW_TOKEN_SECRET_ARN: !Ref PreviewTokenSecretArn
+          PREVIEW_BASE_URL: !Ref PreviewBaseUrl
+
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref OpsTable
+
+      Events:
+        GetProjectPortalShare:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref AdminApi
+            Path: /v1/admin/projects/{projectId}/portal-share
+            Method: GET
+
+        EnableProjectPortalShare:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref AdminApi
+            Path: /v1/admin/projects/{projectId}/portal-share
+            Method: POST
+
+        RegenerateProjectPortalShare:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref AdminApi
+            Path: /v1/admin/projects/{projectId}/portal-share/regenerate
+            Method: POST
+
+        DisableProjectPortalShare:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref AdminApi
+            Path: /v1/admin/projects/{projectId}/portal-share
+            Method: DELETE
 
 
   # ========================================================
