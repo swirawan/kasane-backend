@@ -548,6 +548,34 @@ Resources:
             Path: /v1/admin/projects/{projectId}/scope
             Method: PATCH
 
+        GetProjectPortalShare:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref AdminApi
+            Path: /v1/admin/projects/{projectId}/portal-share
+            Method: GET
+
+        EnableProjectPortalShare:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref AdminApi
+            Path: /v1/admin/projects/{projectId}/portal-share
+            Method: POST
+
+        RegenerateProjectPortalShare:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref AdminApi
+            Path: /v1/admin/projects/{projectId}/portal-share/regenerate
+            Method: POST
+
+        DisableProjectPortalShare:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref AdminApi
+            Path: /v1/admin/projects/{projectId}/portal-share
+            Method: DELETE
+
         EnableClientPortalAccess:
           Type: HttpApi
           Properties:
@@ -934,6 +962,15 @@ Resources:
             TableName: !Ref OpsTable
 
       Events:
+        PublicPortalShare:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref PortalApi
+            Path: /v1/portal/share/{shareId}
+            Method: GET
+            Auth:
+              Authorizer: NONE
+
         CurrentClient:
           Type: HttpApi
           Properties:

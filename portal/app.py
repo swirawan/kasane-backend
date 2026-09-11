@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 from typing import Any
 
 import boto3
@@ -14,6 +15,10 @@ OPS_TABLE_NAME = os.environ.get(
 )
 
 _ops_ddb = None
+
+SHARE_ID_PATTERN = re.compile(
+    r"^[A-Za-z0-9_-]{24,80}$"
+)
 
 
 def _ops_table():
@@ -46,6 +51,10 @@ def _response(
                 "no-store",
             "x-content-type-options":
                 "nosniff",
+            "referrer-policy":
+                "no-referrer",
+            "x-robots-tag":
+                "noindex, nofollow, noarchive",
         },
         "body": json.dumps(
             body,
@@ -80,6 +89,28 @@ def _client_partition_key(
 
     return (
         "CLIENT#EMAIL#"
+        f"{digest}"
+    )
+
+
+def _portal_share_partition_key(
+    share_id: str,
+) -> str:
+    candidate = str(
+        share_id or ""
+    ).strip()
+
+    if not SHARE_ID_PATTERN.fullmatch(
+        candidate
+    ):
+        return ""
+
+    digest = hashlib.sha256(
+        candidate.encode("utf-8")
+    ).hexdigest()
+
+    return (
+        "PORTAL#SHARE#"
         f"{digest}"
     )
 
@@ -192,8 +223,50 @@ def _public_client_project(
             item.get("direction")
             or ""
         ),
+        "createdAt": str(
+            item.get("createdAt")
+            or ""
+        ),
         "updatedAt": str(
             item.get("updatedAt")
+            or ""
+        ),
+
+        # Client-safe contact fields.
+        # Admin support comes in the next slice.
+        "clientContact": {
+            "name": str(
+                item.get(
+                    "clientContactName"
+                )
+                or ""
+            ),
+            "role": str(
+                item.get(
+                    "clientContactRole"
+                )
+                or ""
+            ),
+            "email": str(
+                item.get(
+                    "clientContactEmail"
+                )
+                or ""
+            ),
+        },
+
+        # MUSUBI remains invisible until
+        # Admin explicitly publishes it.
+        "musubiClientVisible": (
+            item.get(
+                "musubiClientVisible"
+            )
+            is True
+        ),
+        "musubiReviewStatus": str(
+            item.get(
+                "musubiReviewStatus"
+            )
             or ""
         ),
     }
@@ -221,6 +294,43 @@ def _client_access_record(
         not isinstance(item, dict)
         or item.get("recordType")
             != "CLIENT_PROJECT_ACCESS"
+        or str(
+            item.get("status")
+            or ""
+        ).upper()
+            != "ACTIVE"
+    ):
+        return None
+
+    return item
+
+
+def _portal_share_record(
+    share_id: str,
+) -> dict[str, Any] | None:
+    partition_key = (
+        _portal_share_partition_key(
+            share_id
+        )
+    )
+
+    if not partition_key:
+        return None
+
+    result = _ops_table().get_item(
+        Key={
+            "PK": partition_key,
+            "SK": "META",
+        },
+        ConsistentRead=True,
+    )
+
+    item = result.get("Item")
+
+    if (
+        not isinstance(item, dict)
+        or item.get("recordType")
+            != "PORTAL_SHARE"
         or str(
             item.get("status")
             or ""
@@ -264,6 +374,29 @@ def _project_record(
         return None
 
     return item
+
+
+def _shared_project(
+    share_id: str,
+) -> dict[str, Any] | None:
+    share = _portal_share_record(
+        share_id
+    )
+
+    if not share:
+        return None
+
+    project_id = str(
+        share.get("projectId")
+        or ""
+    ).strip()
+
+    if not project_id:
+        return None
+
+    return _project_record(
+        project_id
+    )
 
 
 def _list_client_access(
@@ -336,11 +469,12 @@ def _list_client_projects(
 
     projects.sort(
         key=lambda item: (
-            item.get("eventDate")
-            or "9999-12-31",
+            item.get("createdAt")
+            or "",
             item.get("projectId")
             or "",
-        )
+        ),
+        reverse=True,
     )
 
     return projects
@@ -350,19 +484,6 @@ def handler(
     event: dict[str, Any],
     context: Any,
 ) -> dict[str, Any]:
-    identity = _client_identity(
-        event
-    )
-
-    if not identity:
-        return _response(
-            401,
-            {
-                "error":
-                    "client_auth_required"
-            },
-        )
-
     request_context = (
         event.get(
             "requestContext"
@@ -387,6 +508,76 @@ def handler(
         or event.get("path")
         or ""
     )
+
+    # ========================================================
+    # PUBLIC-BY-LINK VIEW
+    #
+    # No Cognito is required to VIEW.
+    # The share ID itself is an unguessable bearer capability.
+    # ========================================================
+
+    if (
+        method == "GET"
+        and "/v1/portal/share/"
+            in path
+    ):
+        parameters = (
+            event.get(
+                "pathParameters"
+            )
+            or {}
+        )
+
+        share_id = str(
+            parameters.get("shareId")
+            or ""
+        ).strip()
+
+        # Always return the same 404 for an invalid,
+        # revoked, disabled or nonexistent link.
+        project = _shared_project(
+            share_id
+        )
+
+        if not project:
+            return _response(
+                404,
+                {
+                    "error":
+                        "portal_not_found"
+                },
+            )
+
+        return _response(
+            200,
+            {
+                "project":
+                    _public_client_project(
+                        project
+                    )
+            },
+        )
+
+    # ========================================================
+    # VERIFIED CLIENT AREA
+    #
+    # Retained for future protected actions such as:
+    # MUSUBI approval / request changes.
+    # It is no longer the portal front door.
+    # ========================================================
+
+    identity = _client_identity(
+        event
+    )
+
+    if not identity:
+        return _response(
+            401,
+            {
+                "error":
+                    "client_auth_required"
+            },
+        )
 
     if (
         method == "GET"
@@ -451,8 +642,6 @@ def handler(
             )
         )
 
-        # Return 404 rather than revealing that
-        # another client's project exists.
         if not access:
             return _response(
                 404,

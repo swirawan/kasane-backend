@@ -6,6 +6,7 @@ import hmac
 import json
 import logging
 import os
+import secrets
 from datetime import datetime, timezone
 from typing import Any
 from uuid import uuid4
@@ -660,6 +661,31 @@ def _project_color(
     )
 
 
+def _public_portal_share(
+    item: dict[str, Any],
+) -> dict[str, Any]:
+    status = str(
+        item.get("portalShareStatus")
+        or "DISABLED"
+    ).strip().upper()
+
+    suffix = str(
+        item.get("portalShareSuffix")
+        or ""
+    ).strip()
+
+    if status != "ACTIVE":
+        return {
+            "status": "DISABLED",
+            "shareSuffix": "",
+        }
+
+    return {
+        "status": "ACTIVE",
+        "shareSuffix": suffix,
+    }
+
+
 def _public_project(
     item: dict[str, Any],
 ) -> dict[str, Any]:
@@ -682,6 +708,8 @@ def _public_project(
         ),
         "projectColor":
             _project_color(item),
+        "portalShare":
+            _public_portal_share(item),
         "activeMemberUserIds": [
             str(user_id)
             for user_id in (
@@ -2298,6 +2326,597 @@ def _project_scope_from_lead(
         ).strip(),
     }
 
+
+
+def _new_portal_share_id() -> str:
+    # 24 random bytes = 192 bits of entropy.
+    # token_urlsafe produces URL-safe characters.
+    return secrets.token_urlsafe(24)
+
+
+def _portal_share_partition_key(
+    share_id: str,
+) -> str:
+    candidate = str(
+        share_id or ""
+    ).strip()
+
+    if not candidate:
+        return ""
+
+    digest = hashlib.sha256(
+        candidate.encode("utf-8")
+    ).hexdigest()
+
+    return (
+        "PORTAL#SHARE#"
+        f"{digest}"
+    )
+
+
+def _portal_share_item(
+    project_id: str,
+    share_id: str,
+    now: str,
+    actor_subject: str,
+) -> dict[str, Any]:
+    return {
+        "PK":
+            _portal_share_partition_key(
+                share_id
+            ),
+        "SK":
+            "META",
+        "recordType":
+            "PORTAL_SHARE",
+        "projectId":
+            project_id,
+        "status":
+            "ACTIVE",
+        "createdAt":
+            now,
+        "createdBy":
+            actor_subject,
+        "updatedAt":
+            now,
+        "updatedBy":
+            actor_subject,
+    }
+
+
+def _enable_portal_share(
+    current: dict[str, Any],
+    actor_subject: str,
+    *,
+    regenerate: bool = False,
+) -> tuple[
+    dict[str, Any],
+    bool,
+    str,
+]:
+    project_id = str(
+        current.get("projectId")
+        or ""
+    ).strip()
+
+    existing_key = str(
+        current.get("portalShareKey")
+        or ""
+    ).strip()
+
+    existing_status = str(
+        current.get(
+            "portalShareStatus"
+        )
+        or ""
+    ).strip().upper()
+
+    if (
+        not regenerate
+        and existing_key
+        and existing_status == "ACTIVE"
+    ):
+        # The bearer credential is deliberately
+        # unrecoverable after creation.
+        return current, False, ""
+
+    share_id = (
+        _new_portal_share_id()
+    )
+
+    share_key = (
+        _portal_share_partition_key(
+            share_id
+        )
+    )
+
+    now = _utcnow()
+
+    share_item = (
+        _portal_share_item(
+            project_id,
+            share_id,
+            now,
+            actor_subject,
+        )
+    )
+
+    transaction = []
+
+    if existing_key:
+        transaction.append({
+            "Delete": {
+                "TableName":
+                    OPS_TABLE_NAME,
+                "Key":
+                    _serialize_map({
+                        "PK":
+                            existing_key,
+                        "SK":
+                            "META",
+                    }),
+            }
+        })
+
+    transaction.extend([
+        {
+            "Put": {
+                "TableName":
+                    OPS_TABLE_NAME,
+                "Item":
+                    _serialize_map(
+                        share_item
+                    ),
+                "ConditionExpression": (
+                    "attribute_not_exists(PK) "
+                    "AND "
+                    "attribute_not_exists(SK)"
+                ),
+            }
+        },
+        {
+            "Update": {
+                "TableName":
+                    OPS_TABLE_NAME,
+                "Key":
+                    _serialize_map({
+                        "PK":
+                            f"PROJECT#{project_id}",
+                        "SK":
+                            "META",
+                    }),
+                "UpdateExpression": (
+                    "SET "
+                    "portalShareKey = :share_key, "
+                    "portalShareSuffix = :suffix, "
+                    "portalShareStatus = :active, "
+                    "portalShareCreatedAt = "
+                    "if_not_exists("
+                    "portalShareCreatedAt, :now), "
+                    "portalShareUpdatedAt = :now, "
+                    "updatedAt = :now, "
+                    "updatedBy = :actor"
+                ),
+                "ConditionExpression": (
+                    "attribute_exists(PK) "
+                    "AND "
+                    "recordType = "
+                    ":project_type"
+                ),
+                "ExpressionAttributeValues":
+                    _serialize_map({
+                        ":share_key":
+                            share_key,
+                        ":suffix":
+                            share_id[-6:],
+                        ":active":
+                            "ACTIVE",
+                        ":now":
+                            now,
+                        ":actor":
+                            actor_subject,
+                        ":project_type":
+                            "PROJECT",
+                    }),
+            }
+        },
+    ])
+
+    boto3.client(
+        "dynamodb"
+    ).transact_write_items(
+        TransactItems=transaction
+    )
+
+    activity_type = (
+        "PORTAL_SHARE_REGENERATED"
+        if (
+            regenerate
+            and existing_key
+        )
+        else
+        "PORTAL_SHARE_ENABLED"
+    )
+
+    _record_activity(
+        project_id,
+        actor_subject,
+        activity_type,
+        (
+            "Regenerated client portal link"
+            if activity_type
+                == "PORTAL_SHARE_REGENERATED"
+            else
+            "Enabled client portal link"
+        ),
+        {},
+    )
+
+    updated = _project_record(
+        project_id
+    )
+
+    if not updated:
+        raise RuntimeError(
+            "project_missing_after_portal_share"
+        )
+
+    return updated, True, share_id
+
+
+def _disable_portal_share(
+    current: dict[str, Any],
+    actor_subject: str,
+) -> tuple[
+    dict[str, Any],
+    bool,
+]:
+    project_id = str(
+        current.get("projectId")
+        or ""
+    ).strip()
+
+    share_key = str(
+        current.get("portalShareKey")
+        or ""
+    ).strip()
+
+    status = str(
+        current.get(
+            "portalShareStatus"
+        )
+        or "DISABLED"
+    ).strip().upper()
+
+    if (
+        status != "ACTIVE"
+        and not share_key
+    ):
+        return current, False
+
+    now = _utcnow()
+
+    transaction = []
+
+    if share_key:
+        transaction.append({
+            "Delete": {
+                "TableName":
+                    OPS_TABLE_NAME,
+                "Key":
+                    _serialize_map({
+                        "PK":
+                            share_key,
+                        "SK":
+                            "META",
+                    }),
+            }
+        })
+
+    transaction.append({
+        "Update": {
+            "TableName":
+                OPS_TABLE_NAME,
+            "Key":
+                _serialize_map({
+                    "PK":
+                        f"PROJECT#{project_id}",
+                    "SK":
+                        "META",
+                }),
+            "UpdateExpression": (
+                "SET "
+                "portalShareStatus = "
+                ":disabled, "
+                "portalShareDisabledAt = "
+                ":now, "
+                "portalShareUpdatedAt = "
+                ":now, "
+                "updatedAt = :now, "
+                "updatedBy = :actor "
+                "REMOVE "
+                "portalShareKey, "
+                "portalShareSuffix"
+            ),
+            "ConditionExpression": (
+                "attribute_exists(PK) "
+                "AND "
+                "recordType = "
+                ":project_type"
+            ),
+            "ExpressionAttributeValues":
+                _serialize_map({
+                    ":disabled":
+                        "DISABLED",
+                    ":now":
+                        now,
+                    ":actor":
+                        actor_subject,
+                    ":project_type":
+                        "PROJECT",
+                }),
+        }
+    })
+
+    boto3.client(
+        "dynamodb"
+    ).transact_write_items(
+        TransactItems=transaction
+    )
+
+    _record_activity(
+        project_id,
+        actor_subject,
+        "PORTAL_SHARE_DISABLED",
+        "Disabled client portal link",
+        {},
+    )
+
+    updated = _project_record(
+        project_id
+    )
+
+    if not updated:
+        raise RuntimeError(
+            "project_missing_after_portal_disable"
+        )
+
+    return updated, True
+
+
+def _portal_share_project(
+    event: dict[str, Any],
+) -> tuple[
+    str,
+    dict[str, Any] | None,
+]:
+    parameters = (
+        event.get("pathParameters")
+        or {}
+    )
+
+    project_id = str(
+        parameters.get("projectId")
+        or ""
+    ).strip()
+
+    if not project_id:
+        return "", None
+
+    return (
+        project_id,
+        _project_record(
+            project_id
+        ),
+    )
+
+
+def _handle_get_portal_share(
+    event: dict[str, Any],
+):
+    try:
+        project_id, project = (
+            _portal_share_project(
+                event
+            )
+        )
+
+        if not project_id:
+            return _response(
+                400,
+                {
+                    "error":
+                        "project_id_required"
+                },
+            )
+
+        if not project:
+            return _response(
+                404,
+                {
+                    "error":
+                        "project_not_found"
+                },
+            )
+
+    except (
+        BotoCoreError,
+        ClientError,
+        RuntimeError,
+    ):
+        LOGGER.exception(
+            "Failed to read portal share"
+        )
+
+        return _response(
+            503,
+            {
+                "error":
+                    "temporarily_unavailable"
+            },
+        )
+
+    return _response(
+        200,
+        {
+            "portalShare":
+                _public_portal_share(
+                    project
+                )
+        },
+    )
+
+
+def _handle_enable_portal_share(
+    event: dict[str, Any],
+    identity: dict[str, Any],
+    *,
+    regenerate: bool = False,
+):
+    try:
+        project_id, project = (
+            _portal_share_project(
+                event
+            )
+        )
+
+        if not project_id:
+            return _response(
+                400,
+                {
+                    "error":
+                        "project_id_required"
+                },
+            )
+
+        if not project:
+            return _response(
+                404,
+                {
+                    "error":
+                        "project_not_found"
+                },
+            )
+
+        (
+            updated,
+            changed,
+            share_id,
+        ) = _enable_portal_share(
+            project,
+            identity["subject"],
+            regenerate=regenerate,
+        )
+
+    except (
+        BotoCoreError,
+        ClientError,
+        RuntimeError,
+    ):
+        LOGGER.exception(
+            "Portal share enable failed"
+        )
+
+        return _response(
+            503,
+            {
+                "error":
+                    "temporarily_unavailable"
+            },
+        )
+
+    public_share = (
+        _public_portal_share(
+            updated
+        )
+    )
+
+    # Only the request that actually created a new
+    # bearer credential receives that credential.
+    if share_id:
+        public_share = {
+            **public_share,
+            "shareId":
+                share_id,
+            "path":
+                f"/p/{share_id}",
+        }
+
+    return _response(
+        201 if changed else 200,
+        {
+            "portalShare":
+                public_share,
+            "changed":
+                changed,
+        },
+    )
+
+
+def _handle_disable_portal_share(
+    event: dict[str, Any],
+    identity: dict[str, Any],
+):
+    try:
+        project_id, project = (
+            _portal_share_project(
+                event
+            )
+        )
+
+        if not project_id:
+            return _response(
+                400,
+                {
+                    "error":
+                        "project_id_required"
+                },
+            )
+
+        if not project:
+            return _response(
+                404,
+                {
+                    "error":
+                        "project_not_found"
+                },
+            )
+
+        updated, changed = (
+            _disable_portal_share(
+                project,
+                identity["subject"],
+            )
+        )
+
+    except (
+        BotoCoreError,
+        ClientError,
+        RuntimeError,
+    ):
+        LOGGER.exception(
+            "Portal share disable failed"
+        )
+
+        return _response(
+            503,
+            {
+                "error":
+                    "temporarily_unavailable"
+            },
+        )
+
+    return _response(
+        200,
+        {
+            "portalShare":
+                _public_portal_share(
+                    updated
+                ),
+            "changed":
+                changed,
+        },
+    )
 
 
 def _client_access_partition_key(
@@ -11690,6 +12309,74 @@ def handler(
             event,
             identity["subject"],
         )
+
+    if (
+        method == "POST"
+        and path.endswith(
+            "/portal-share/regenerate"
+        )
+        and "/v1/admin/projects/"
+            in path
+    ):
+        if identity["role"] not in {
+            "OWNER",
+            "MANAGER",
+        }:
+            return _response(
+                403,
+                {
+                    "error":
+                        "manager_or_owner_required"
+                },
+            )
+
+        return _handle_enable_portal_share(
+            event,
+            identity,
+            regenerate=True,
+        )
+
+    if (
+        path.endswith(
+            "/portal-share"
+        )
+        and "/v1/admin/projects/"
+            in path
+    ):
+        if identity["role"] not in {
+            "OWNER",
+            "MANAGER",
+        }:
+            return _response(
+                403,
+                {
+                    "error":
+                        "manager_or_owner_required"
+                },
+            )
+
+        if method == "GET":
+            return (
+                _handle_get_portal_share(
+                    event
+                )
+            )
+
+        if method == "POST":
+            return (
+                _handle_enable_portal_share(
+                    event,
+                    identity,
+                )
+            )
+
+        if method == "DELETE":
+            return (
+                _handle_disable_portal_share(
+                    event,
+                    identity,
+                )
+            )
 
     if (
         method == "POST"

@@ -2277,3 +2277,197 @@ def test_client_portal_user_is_passwordless():
         access["status"]
         == "ACTIVE"
     )
+
+
+
+# PHASE 7 — PRIVATE PORTAL SHARE LINKS
+
+def test_portal_share_id_is_unpredictable():
+    first = (
+        admin_app
+        ._new_portal_share_id()
+    )
+
+    second = (
+        admin_app
+        ._new_portal_share_id()
+    )
+
+    assert first != second
+    assert len(first) >= 30
+
+    assert (
+        "KAS-001"
+        not in first
+    )
+
+    assert (
+        "alya"
+        not in first.lower()
+    )
+
+
+def test_public_portal_share_never_exposes_bearer_token():
+    item = project()
+
+    item[
+        "portalShareStatus"
+    ] = "ACTIVE"
+
+    item[
+        "portalShareKey"
+    ] = (
+        "PORTAL#SHARE#"
+        + "a" * 64
+    )
+
+    item[
+        "portalShareSuffix"
+    ] = "ABC123"
+
+    result = (
+        admin_app
+        ._public_portal_share(
+            item
+        )
+    )
+
+    assert result == {
+        "status": "ACTIVE",
+        "shareSuffix": "ABC123",
+    }
+
+    assert "shareId" not in result
+    assert "path" not in result
+    assert "portalShareKey" not in result
+
+    item[
+        "portalShareStatus"
+    ] = "DISABLED"
+
+    disabled = (
+        admin_app
+        ._public_portal_share(
+            item
+        )
+    )
+
+    assert disabled == {
+        "status": "DISABLED",
+        "shareSuffix": "",
+    }
+
+
+def test_worker_cannot_enable_portal_share():
+    with patch.object(
+        admin_app,
+        "_authorize_identity",
+        return_value=(
+            identity("WORKER"),
+            None,
+        ),
+    ):
+        response = admin_app.handler(
+            event(
+                "POST",
+                "/v1/admin/projects/"
+                "KAS-001/portal-share",
+                project_id="KAS-001",
+            ),
+            None,
+        )
+
+    assert response["statusCode"] == 403
+
+
+def test_manager_can_enable_portal_share():
+    response_body = {
+        "portalShare": {
+            "status": "ACTIVE",
+            "shareId":
+                "private-share-id-123456789012",
+            "path":
+                "/p/private-share-id-123456789012",
+        },
+        "changed": True,
+    }
+
+    with patch.object(
+        admin_app,
+        "_authorize_identity",
+        return_value=(
+            identity("MANAGER"),
+            None,
+        ),
+    ), patch.object(
+        admin_app,
+        "_handle_enable_portal_share",
+        return_value=
+            admin_app._response(
+                201,
+                response_body,
+            ),
+    ):
+        response = admin_app.handler(
+            event(
+                "POST",
+                "/v1/admin/projects/"
+                "KAS-001/portal-share",
+                project_id="KAS-001",
+            ),
+            None,
+        )
+
+    assert response["statusCode"] == 201
+
+    assert (
+        body(response)[
+            "portalShare"
+        ]["status"]
+        == "ACTIVE"
+    )
+
+
+def test_manager_can_regenerate_portal_share():
+    with patch.object(
+        admin_app,
+        "_authorize_identity",
+        return_value=(
+            identity("MANAGER"),
+            None,
+        ),
+    ), patch.object(
+        admin_app,
+        "_handle_enable_portal_share",
+        return_value=
+            admin_app._response(
+                201,
+                {
+                    "portalShare": {
+                        "status":
+                            "ACTIVE",
+                    },
+                    "changed":
+                        True,
+                },
+            ),
+    ) as mocked:
+        response = admin_app.handler(
+            event(
+                "POST",
+                "/v1/admin/projects/"
+                "KAS-001/portal-share/"
+                "regenerate",
+                project_id="KAS-001",
+            ),
+            None,
+        )
+
+    assert response["statusCode"] == 201
+
+    assert (
+        mocked.call_args.kwargs[
+            "regenerate"
+        ]
+        is True
+    )

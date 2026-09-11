@@ -312,3 +312,113 @@ def test_project_detail_returns_safe_project():
 
     assert "email" not in result
     assert "phone" not in result
+
+
+
+# PHASE 7 — PRIVATE SHARE LINKS
+
+def share_event(
+    share_id="q7K2mV8xP4rN6cT9Wz3HdA99",
+):
+    path = (
+        "/v1/portal/share/"
+        f"{share_id}"
+    )
+
+    return {
+        "version": "2.0",
+        "rawPath": path,
+        "pathParameters": {
+            "shareId": share_id,
+        },
+        "requestContext": {
+            "http": {
+                "method": "GET",
+                "path": path,
+            },
+        },
+    }
+
+
+def test_share_partition_key_does_not_expose_token():
+    share_id = (
+        "q7K2mV8xP4rN6cT9Wz3HdA99"
+    )
+
+    key = (
+        portal_app
+        ._portal_share_partition_key(
+            share_id
+        )
+    )
+
+    assert key.startswith(
+        "PORTAL#SHARE#"
+    )
+
+    assert share_id not in key
+
+
+def test_public_share_does_not_require_auth():
+    with patch.object(
+        portal_app,
+        "_shared_project",
+        return_value=project(),
+    ):
+        response = portal_app.handler(
+            share_event(),
+            None,
+        )
+
+    assert response["statusCode"] == 200
+
+    result = body(response)["project"]
+
+    assert (
+        result["projectId"]
+        == "KAS-001"
+    )
+
+    assert "email" not in result
+    assert "phone" not in result
+
+
+def test_public_share_invalid_or_revoked_is_generic_404():
+    with patch.object(
+        portal_app,
+        "_shared_project",
+        return_value=None,
+    ):
+        response = portal_app.handler(
+            share_event(),
+            None,
+        )
+
+    assert response["statusCode"] == 404
+
+    assert body(response) == {
+        "error": "portal_not_found"
+    }
+
+
+def test_public_serializer_keeps_musubi_hidden_by_default():
+    result = (
+        portal_app
+        ._public_client_project(
+            project()
+        )
+    )
+
+    assert (
+        result[
+            "musubiClientVisible"
+        ]
+        is False
+    )
+
+    assert (
+        result[
+            "musubiReviewStatus"
+        ]
+        == ""
+    )
