@@ -30,10 +30,12 @@ def event(
     *,
     email="client@example.com",
     verified=True,
+    token_use="id",
     project_id=None,
 ):
     claims = {
         "sub": "client-sub-1",
+        "token_use": token_use,
         "email": email,
         "email_verified":
             "true"
@@ -156,6 +158,18 @@ def test_client_identity_requires_verified_email():
             event(
                 "/v1/client/me",
                 verified=False,
+            )
+        )
+        is None
+    )
+
+
+def test_client_identity_rejects_access_token():
+    assert (
+        portal_app._client_identity(
+            event(
+                "/v1/client/me",
+                token_use="access",
             )
         )
         is None

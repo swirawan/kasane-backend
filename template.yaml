@@ -47,6 +47,12 @@ Parameters:
     Description: Origins allowed to call the KASANE Admin API.
 
 
+  PortalAllowedOrigins:
+    Type: CommaDelimitedList
+    Default: http://localhost:5174,https://portal-dev.kasanecollective.com
+    Description: Origins allowed to call the KASANE Client Portal API.
+
+
   PreviewTokenSecretArn:
     Type: String
     Default: ''
@@ -772,6 +778,167 @@ Resources:
             Method: PATCH
 
 
+  # ========================================================
+  # PHASE 7 — KASANE CLIENT PORTAL
+  # ========================================================
+
+  PortalApiAccessLogs:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      RetentionInDays: 30
+
+
+  ClientUserPool:
+    Type: AWS::Cognito::UserPool
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+
+    Properties:
+      UserPoolName: !Sub kasane-client-${StageName}
+
+      UserPoolTier: ESSENTIALS
+
+      UsernameAttributes:
+        - email
+
+      UsernameConfiguration:
+        CaseSensitive: false
+
+      AutoVerifiedAttributes:
+        - email
+
+      AdminCreateUserConfig:
+        AllowAdminCreateUserOnly: true
+
+      Policies:
+        SignInPolicy:
+          AllowedFirstAuthFactors:
+            - EMAIL_OTP
+
+      MfaConfiguration: OFF
+
+      EmailConfiguration:
+        EmailSendingAccount: COGNITO_DEFAULT
+
+      EmailAuthenticationSubject: Your KASANE sign-in code
+
+      EmailAuthenticationMessage: >-
+        Your KASANE sign-in code is {####}.
+        Enter this code to access your event portal.
+
+      UserAttributeUpdateSettings:
+        AttributesRequireVerificationBeforeUpdate:
+          - email
+
+
+  ClientUserPoolClient:
+    Type: AWS::Cognito::UserPoolClient
+
+    Properties:
+      UserPoolId: !Ref ClientUserPool
+      ClientName: !Sub kasane-portal-${StageName}
+
+      GenerateSecret: false
+      PreventUserExistenceErrors: ENABLED
+      EnableTokenRevocation: true
+
+      ExplicitAuthFlows:
+        - ALLOW_USER_AUTH
+        - ALLOW_REFRESH_TOKEN_AUTH
+
+      AccessTokenValidity: 30
+      IdTokenValidity: 30
+      RefreshTokenValidity: 7
+
+      TokenValidityUnits:
+        AccessToken: minutes
+        IdToken: minutes
+        RefreshToken: days
+
+
+  PortalApi:
+    Type: AWS::Serverless::HttpApi
+
+    Properties:
+      Name: !Sub kasane-portal-${StageName}
+      StageName: !Ref StageName
+
+      CorsConfiguration:
+        AllowOrigins: !Ref PortalAllowedOrigins
+
+        AllowMethods:
+          - GET
+          - OPTIONS
+
+        AllowHeaders:
+          - authorization
+          - content-type
+
+        MaxAge: 600
+
+      DefaultRouteSettings:
+        ThrottlingRateLimit: 10
+        ThrottlingBurstLimit: 20
+
+      AccessLogSettings:
+        DestinationArn: !GetAtt PortalApiAccessLogs.Arn
+        Format: '{"requestId":"$context.requestId","routeKey":"$context.routeKey","status":"$context.status","responseLength":"$context.responseLength"}'
+
+      Auth:
+        DefaultAuthorizer: ClientJwtAuthorizer
+
+        Authorizers:
+          ClientJwtAuthorizer:
+            IdentitySource: $request.header.Authorization
+
+            JwtConfiguration:
+              issuer: !Sub https://cognito-idp.${AWS::Region}.${AWS::URLSuffix}/${ClientUserPool}
+
+              audience:
+                - !Ref ClientUserPoolClient
+
+
+  PortalFunction:
+    Type: AWS::Serverless::Function
+
+    Properties:
+      CodeUri: portal/
+      Handler: app.handler
+      Description: KASANE authenticated client portal read API.
+      Timeout: 5
+
+      Environment:
+        Variables:
+          OPS_TABLE_NAME: !Ref OpsTable
+          STAGE: !Ref StageName
+
+      Policies:
+        - DynamoDBReadPolicy:
+            TableName: !Ref OpsTable
+
+      Events:
+        CurrentClient:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref PortalApi
+            Path: /v1/client/me
+            Method: GET
+
+        ListClientProjects:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref PortalApi
+            Path: /v1/client/projects
+            Method: GET
+
+        GetClientProject:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref PortalApi
+            Path: /v1/client/projects/{projectId}
+            Method: GET
+
+
   TurnstileSecret:
     Type: AWS::SecretsManager::Secret
     Properties:
@@ -808,6 +975,22 @@ Outputs:
   StaffUserPoolClientId:
     Description: KASANE Admin application client
     Value: !Ref StaffUserPoolClient
+  PortalApiId:
+    Description: KASANE Client Portal HTTP API ID
+    Value: !Ref PortalApi
+
+  PortalApiBaseUrl:
+    Description: KASANE Client Portal API base URL
+    Value: !Sub https://${PortalApi}.execute-api.${AWS::Region}.${AWS::URLSuffix}/${StageName}
+
+  ClientUserPoolId:
+    Description: KASANE client Cognito User Pool
+    Value: !Ref ClientUserPool
+
+  ClientUserPoolClientId:
+    Description: KASANE Client Portal application client
+    Value: !Ref ClientUserPoolClient
+
 
   TurnstileSecretArn:
     Value: !Ref TurnstileSecret

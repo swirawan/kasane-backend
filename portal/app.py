@@ -103,6 +103,11 @@ def _client_identity(
         "claims"
     ) or {}
 
+    token_use = str(
+        claims.get("token_use")
+        or ""
+    ).strip().lower()
+
     email = _normalize_email(
         claims.get("email")
     )
@@ -120,7 +125,8 @@ def _client_identity(
     )
 
     if (
-        not email
+        token_use != "id"
+        or not email
         or not email_verified
     ):
         return None
