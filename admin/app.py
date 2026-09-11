@@ -720,6 +720,10 @@ def _public_project(
             item.get("preferredContact")
             or ""
         ),
+        "clientBrief": str(
+            item.get("clientBrief")
+            or ""
+        ),
         "package": str(
             item.get("package")
             or ""
@@ -2261,6 +2265,15 @@ def _handle_project_lifecycle(
     )
 
 
+def _project_client_brief_from_lead(
+    lead: dict[str, Any],
+) -> str:
+    return str(
+        lead.get("message")
+        or ""
+    )
+
+
 def _project_scope_from_lead(
     lead: dict[str, Any],
 ) -> dict[str, str]:
@@ -2378,6 +2391,10 @@ def _convert_lead(
                 lead.get("preferredContact")
                 or ""
             ),
+            "clientBrief":
+                _project_client_brief_from_lead(
+                    lead
+                ),
             **_project_scope_from_lead(
                 lead
             ),

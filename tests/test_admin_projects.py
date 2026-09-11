@@ -1792,3 +1792,48 @@ def test_project_scope_update_records_activity():
         "package"
         in args[4]["changedFields"]
     )
+
+
+
+def test_project_client_brief_preserves_message():
+    item = lead()
+    item["message"] = (
+        "500 guests.\n"
+        "Need help with catering and stage."
+    )
+
+    result = (
+        admin_app
+        ._project_client_brief_from_lead(
+            item
+        )
+    )
+
+    assert result == (
+        "500 guests.\n"
+        "Need help with catering and stage."
+    )
+
+
+def test_public_project_exposes_client_brief():
+    item = project()
+    item["clientBrief"] = (
+        "Elegant, not too floral."
+    )
+
+    result = admin_app._public_project(
+        item
+    )
+
+    assert (
+        result["clientBrief"]
+        == "Elegant, not too floral."
+    )
+
+
+def test_public_project_defaults_client_brief_blank():
+    result = admin_app._public_project(
+        project()
+    )
+
+    assert result["clientBrief"] == ""
