@@ -816,7 +816,7 @@ Resources:
             - PASSWORD
             - EMAIL_OTP
 
-      MfaConfiguration: OFF
+      MfaConfiguration: 'OFF'
 
       EmailConfiguration:
         EmailSendingAccount: COGNITO_DEFAULT
