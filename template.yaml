@@ -825,6 +825,34 @@ Resources:
             TableName: !Ref OpsTable
 
       Events:
+        UpdateProjectPhase:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref AdminApi
+            Path: /v1/admin/projects/{projectId}/phase
+            Method: PATCH
+
+        SetProjectClientContact:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref AdminApi
+            Path: /v1/admin/projects/{projectId}/client-contact
+            Method: PATCH
+
+        ClearProjectClientContact:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref AdminApi
+            Path: /v1/admin/projects/{projectId}/client-contact
+            Method: DELETE
+
+        PreviewProjectAsClient:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref AdminApi
+            Path: /v1/admin/projects/{projectId}/client-preview
+            Method: GET
+
         GetProjectPortalShare:
           Type: HttpApi
           Properties:

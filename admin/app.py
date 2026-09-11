@@ -89,6 +89,16 @@ PROJECT_STATUSES = (
     "ARCHIVED",
 )
 
+PROJECT_PHASES = (
+    "DISCOVERY",
+    "PLANNING",
+    "DESIGN",
+    "PRODUCTION",
+    "FINALIZATION",
+    "EVENT_READY",
+    "COMPLETE",
+)
+
 
 TASK_STATUSES = (
     "TODO",
@@ -710,6 +720,24 @@ def _public_project(
             _project_color(item),
         "portalShare":
             _public_portal_share(item),
+        "clientContactUserId": str(
+            item.get(
+                "clientContactUserId"
+            )
+            or ""
+        ),
+        "clientContactRole": str(
+            item.get(
+                "clientContactRole"
+            )
+            or ""
+        ),
+        "clientContactEmail": str(
+            item.get(
+                "clientContactEmail"
+            )
+            or ""
+        ),
         "activeMemberUserIds": [
             str(user_id)
             for user_id in (
@@ -857,6 +885,1031 @@ def _public_project(
             or ""
         ),
     }
+
+
+def _normalize_project_phase(
+    value: Any,
+) -> str:
+    phase = (
+        str(value or "")
+        .strip()
+        .upper()
+        .replace("-", "_")
+        .replace(" ", "_")
+    )
+
+    if phase not in PROJECT_PHASES:
+        return ""
+
+    return phase
+
+
+def _safe_client_contact_email(
+    value: Any,
+) -> str:
+    email = (
+        str(value or "")
+        .strip()
+        .lower()
+    )
+
+    if (
+        not email
+        or not email.endswith(
+            "@kasanecollective.com"
+        )
+    ):
+        return ""
+
+    local_part = email.split(
+        "@",
+        1,
+    )[0]
+
+    if not local_part:
+        return ""
+
+    return email
+
+
+def _default_client_contact_role(
+    membership: dict[str, Any],
+) -> str:
+    project_role = str(
+        membership.get("projectRole")
+        or ""
+    ).strip().upper()
+
+    return {
+        "PROJECT_LEAD":
+            "Event Lead",
+        "COORDINATOR":
+            "Event Coordinator",
+        "PRODUCTION":
+            "Production Lead",
+        "CREATIVE":
+            "Creative Lead",
+        "LOGISTICS":
+            "Logistics Lead",
+        "VENDOR_LIAISON":
+            "Vendor Liaison",
+    }.get(
+        project_role,
+        "KASANE Team",
+    )
+
+
+def _resolved_client_contact(
+    project: dict[str, Any],
+) -> dict[str, str]:
+    project_id = str(
+        project.get("projectId")
+        or ""
+    ).strip()
+
+    user_id = str(
+        project.get(
+            "clientContactUserId"
+        )
+        or ""
+    ).strip()
+
+    role = str(
+        project.get(
+            "clientContactRole"
+        )
+        or ""
+    ).strip()
+
+    email = (
+        _safe_client_contact_email(
+            project.get(
+                "clientContactEmail"
+            )
+        )
+    )
+
+    if (
+        not project_id
+        or not user_id
+    ):
+        return {
+            "userId": "",
+            "name": "",
+            "role": "",
+            "email": "",
+        }
+
+    membership = (
+        _project_member_record(
+            project_id,
+            user_id,
+        )
+    )
+
+    if (
+        not membership
+        or str(
+            membership.get(
+                "membershipStatus"
+            )
+            or ""
+        ).upper()
+        != "ACTIVE"
+    ):
+        return {
+            "userId": "",
+            "name": "",
+            "role": "",
+            "email": "",
+        }
+
+    staff = _staff_record(
+        user_id
+    )
+
+    if (
+        not staff
+        or str(
+            staff.get("status")
+            or ""
+        ).upper()
+        != "ACTIVE"
+    ):
+        return {
+            "userId": "",
+            "name": "",
+            "role": "",
+            "email": "",
+        }
+
+    return {
+        "userId":
+            user_id,
+        "name":
+            str(
+                staff.get(
+                    "displayName"
+                )
+                or ""
+            ).strip(),
+        "role":
+            role
+            or
+            _default_client_contact_role(
+                membership
+            ),
+        "email":
+            email,
+    }
+
+
+def _client_safe_project(
+    project: dict[str, Any],
+) -> dict[str, Any]:
+    return {
+        "projectId": str(
+            project.get("projectId")
+            or ""
+        ),
+        "name": str(
+            project.get("name")
+            or ""
+        ),
+        "status": str(
+            project.get("status")
+            or ""
+        ),
+        "phase": str(
+            project.get("phase")
+            or ""
+        ),
+        "eventType": str(
+            project.get("eventType")
+            or ""
+        ),
+        "eventDate": str(
+            project.get("eventDate")
+            or ""
+        ),
+        "city": str(
+            project.get("city")
+            or ""
+        ),
+        "guests": str(
+            project.get("guests")
+            or ""
+        ),
+        "clientBrief": str(
+            project.get("clientBrief")
+            or ""
+        ),
+        "package": str(
+            project.get("package")
+            or ""
+        ),
+        "product": str(
+            project.get("product")
+            or ""
+        ),
+        "direction": str(
+            project.get("direction")
+            or ""
+        ),
+        "createdAt": str(
+            project.get("createdAt")
+            or ""
+        ),
+        "updatedAt": str(
+            project.get("updatedAt")
+            or ""
+        ),
+        "clientContact":
+            _resolved_client_contact(
+                project
+            ),
+        "musubiClientVisible": (
+            project.get(
+                "musubiClientVisible"
+            )
+            is True
+        ),
+        "musubiReviewStatus": str(
+            project.get(
+                "musubiReviewStatus"
+            )
+            or ""
+        ),
+    }
+
+
+def _update_project_phase(
+    current: dict[str, Any],
+    phase: str,
+    actor_subject: str,
+) -> tuple[
+    dict[str, Any],
+    bool,
+]:
+    previous = str(
+        current.get("phase")
+        or ""
+    ).strip().upper()
+
+    if previous == phase:
+        return current, False
+
+    project_id = str(
+        current.get("projectId")
+        or ""
+    )
+
+    now = _utcnow()
+
+    response = _ops_table().update_item(
+        Key={
+            "PK":
+                f"PROJECT#{project_id}",
+            "SK":
+                "META",
+        },
+        UpdateExpression=(
+            "SET "
+            "phase = :phase, "
+            "updatedAt = :now, "
+            "updatedBy = :actor"
+        ),
+        ConditionExpression=(
+            "attribute_exists(PK) "
+            "AND "
+            "recordType = :project_type "
+            "AND #status = :active"
+        ),
+        ExpressionAttributeNames={
+            "#status": "status",
+        },
+        ExpressionAttributeValues={
+            ":phase":
+                phase,
+            ":now":
+                now,
+            ":actor":
+                actor_subject,
+            ":project_type":
+                "PROJECT",
+            ":active":
+                "ACTIVE",
+        },
+        ReturnValues="ALL_NEW",
+    )
+
+    updated = response["Attributes"]
+
+    _record_activity(
+        project_id,
+        actor_subject,
+        "PROJECT_PHASE_CHANGED",
+        (
+            "Changed project phase "
+            f"to {phase.lower()}"
+        ),
+        {
+            "previousPhase":
+                previous,
+            "phase":
+                phase,
+        },
+    )
+
+    return updated, True
+
+
+def _set_project_client_contact(
+    current: dict[str, Any],
+    *,
+    user_id: str,
+    client_role: str,
+    client_email: str,
+    actor_subject: str,
+) -> tuple[
+    dict[str, Any],
+    bool,
+]:
+    project_id = str(
+        current.get("projectId")
+        or ""
+    ).strip()
+
+    membership = (
+        _project_member_record(
+            project_id,
+            user_id,
+        )
+    )
+
+    if (
+        not membership
+        or str(
+            membership.get(
+                "membershipStatus"
+            )
+            or ""
+        ).upper()
+        != "ACTIVE"
+    ):
+        raise ValueError(
+            "client_contact_not_active_project_member"
+        )
+
+    staff = _staff_record(
+        user_id
+    )
+
+    if (
+        not staff
+        or str(
+            staff.get("status")
+            or ""
+        ).upper()
+        != "ACTIVE"
+    ):
+        raise ValueError(
+            "client_contact_staff_not_active"
+        )
+
+    role = (
+        " ".join(
+            str(
+                client_role or ""
+            ).split()
+        )
+        or
+        _default_client_contact_role(
+            membership
+        )
+    )
+
+    if len(role) > 80:
+        raise ValueError(
+            "client_contact_role_too_long"
+        )
+
+    email = (
+        _safe_client_contact_email(
+            client_email
+        )
+    )
+
+    if not email:
+        email = (
+            _safe_client_contact_email(
+                staff.get("email")
+            )
+        )
+
+    if not email:
+        raise ValueError(
+            "client_contact_company_email_required"
+        )
+
+    existing_user = str(
+        current.get(
+            "clientContactUserId"
+        )
+        or ""
+    )
+
+    existing_role = str(
+        current.get(
+            "clientContactRole"
+        )
+        or ""
+    )
+
+    existing_email = str(
+        current.get(
+            "clientContactEmail"
+        )
+        or ""
+    ).lower()
+
+    if (
+        existing_user == user_id
+        and existing_role == role
+        and existing_email == email
+    ):
+        return current, False
+
+    now = _utcnow()
+
+    response = _ops_table().update_item(
+        Key={
+            "PK":
+                f"PROJECT#{project_id}",
+            "SK":
+                "META",
+        },
+        UpdateExpression=(
+            "SET "
+            "clientContactUserId = :user_id, "
+            "clientContactRole = :role, "
+            "clientContactEmail = :email, "
+            "clientContactUpdatedAt = :now, "
+            "clientContactUpdatedBy = :actor, "
+            "updatedAt = :now, "
+            "updatedBy = :actor"
+        ),
+        ConditionExpression=(
+            "attribute_exists(PK) "
+            "AND "
+            "recordType = :project_type"
+        ),
+        ExpressionAttributeValues={
+            ":user_id":
+                user_id,
+            ":role":
+                role,
+            ":email":
+                email,
+            ":now":
+                now,
+            ":actor":
+                actor_subject,
+            ":project_type":
+                "PROJECT",
+        },
+        ReturnValues="ALL_NEW",
+    )
+
+    updated = response["Attributes"]
+
+    _record_activity(
+        project_id,
+        actor_subject,
+        "CLIENT_CONTACT_CHANGED",
+        "Changed primary client contact",
+        {
+            "userId":
+                user_id,
+            "clientRole":
+                role,
+            "clientEmail":
+                email,
+        },
+    )
+
+    return updated, True
+
+
+def _clear_project_client_contact(
+    current: dict[str, Any],
+    actor_subject: str,
+) -> tuple[
+    dict[str, Any],
+    bool,
+]:
+    project_id = str(
+        current.get("projectId")
+        or ""
+    ).strip()
+
+    had_contact = bool(
+        str(
+            current.get(
+                "clientContactUserId"
+            )
+            or ""
+        ).strip()
+    )
+
+    if not had_contact:
+        return current, False
+
+    now = _utcnow()
+
+    response = _ops_table().update_item(
+        Key={
+            "PK":
+                f"PROJECT#{project_id}",
+            "SK":
+                "META",
+        },
+        UpdateExpression=(
+            "SET "
+            "clientContactUpdatedAt = :now, "
+            "clientContactUpdatedBy = :actor, "
+            "updatedAt = :now, "
+            "updatedBy = :actor "
+            "REMOVE "
+            "clientContactUserId, "
+            "clientContactRole, "
+            "clientContactEmail"
+        ),
+        ConditionExpression=(
+            "attribute_exists(PK) "
+            "AND "
+            "recordType = :project_type"
+        ),
+        ExpressionAttributeValues={
+            ":now":
+                now,
+            ":actor":
+                actor_subject,
+            ":project_type":
+                "PROJECT",
+        },
+        ReturnValues="ALL_NEW",
+    )
+
+    updated = response["Attributes"]
+
+    _record_activity(
+        project_id,
+        actor_subject,
+        "CLIENT_CONTACT_CLEARED",
+        "Cleared primary client contact",
+        {},
+    )
+
+    return updated, True
+
+
+def _project_from_event(
+    event: dict[str, Any],
+) -> tuple[
+    str,
+    dict[str, Any] | None,
+]:
+    parameters = (
+        event.get("pathParameters")
+        or {}
+    )
+
+    project_id = str(
+        parameters.get("projectId")
+        or ""
+    ).strip()
+
+    if not project_id:
+        return "", None
+
+    return (
+        project_id,
+        _project_record(
+            project_id
+        ),
+    )
+
+
+def _handle_update_project_phase(
+    event: dict[str, Any],
+    identity: dict[str, Any],
+):
+    body = _request_body(
+        event
+    )
+
+    if body is None:
+        return _response(
+            400,
+            {
+                "error":
+                    "invalid_json"
+            },
+        )
+
+    phase = (
+        _normalize_project_phase(
+            body.get("phase")
+        )
+    )
+
+    if not phase:
+        return _response(
+            400,
+            {
+                "error":
+                    "invalid_project_phase",
+                "allowed":
+                    list(PROJECT_PHASES),
+            },
+        )
+
+    try:
+        project_id, project = (
+            _project_from_event(
+                event
+            )
+        )
+
+        if not project_id:
+            return _response(
+                400,
+                {
+                    "error":
+                        "project_id_required"
+                },
+            )
+
+        if not project:
+            return _response(
+                404,
+                {
+                    "error":
+                        "project_not_found"
+                },
+            )
+
+        if str(
+            project.get("status")
+            or ""
+        ).upper() != "ACTIVE":
+            return _response(
+                409,
+                {
+                    "error":
+                        "project_not_active"
+                },
+            )
+
+        updated, changed = (
+            _update_project_phase(
+                project,
+                phase,
+                identity["subject"],
+            )
+        )
+
+    except ClientError as exc:
+        if (
+            _aws_error_code(exc)
+            ==
+            "ConditionalCheckFailedException"
+        ):
+            return _response(
+                409,
+                {
+                    "error":
+                        "project_state_changed"
+                },
+            )
+
+        LOGGER.exception(
+            "Project phase update failed"
+        )
+
+        return _response(
+            503,
+            {
+                "error":
+                    "temporarily_unavailable"
+            },
+        )
+
+    except (
+        BotoCoreError,
+        RuntimeError,
+    ):
+        LOGGER.exception(
+            "Project phase update failed"
+        )
+
+        return _response(
+            503,
+            {
+                "error":
+                    "temporarily_unavailable"
+            },
+        )
+
+    return _response(
+        200,
+        {
+            "project":
+                _public_project(
+                    updated
+                ),
+            "changed":
+                changed,
+        },
+    )
+
+
+def _handle_set_client_contact(
+    event: dict[str, Any],
+    identity: dict[str, Any],
+):
+    body = _request_body(
+        event
+    )
+
+    if body is None:
+        return _response(
+            400,
+            {
+                "error":
+                    "invalid_json"
+            },
+        )
+
+    user_id = str(
+        body.get("userId")
+        or ""
+    ).strip()
+
+    if not user_id:
+        return _response(
+            400,
+            {
+                "error":
+                    "client_contact_user_id_required"
+            },
+        )
+
+    client_role = str(
+        body.get("clientRole")
+        or ""
+    ).strip()
+
+    raw_email = str(
+        body.get("email")
+        or ""
+    ).strip()
+
+    if (
+        raw_email
+        and not _safe_client_contact_email(
+            raw_email
+        )
+    ):
+        return _response(
+            400,
+            {
+                "error":
+                    "client_contact_company_email_required"
+            },
+        )
+
+    try:
+        project_id, project = (
+            _project_from_event(
+                event
+            )
+        )
+
+        if not project_id:
+            return _response(
+                400,
+                {
+                    "error":
+                        "project_id_required"
+                },
+            )
+
+        if not project:
+            return _response(
+                404,
+                {
+                    "error":
+                        "project_not_found"
+                },
+            )
+
+        updated, changed = (
+            _set_project_client_contact(
+                project,
+                user_id=user_id,
+                client_role=client_role,
+                client_email=raw_email,
+                actor_subject=
+                    identity["subject"],
+            )
+        )
+
+    except ValueError as exc:
+        return _response(
+            409,
+            {
+                "error":
+                    str(exc)
+            },
+        )
+
+    except (
+        BotoCoreError,
+        ClientError,
+        RuntimeError,
+    ):
+        LOGGER.exception(
+            "Client contact update failed"
+        )
+
+        return _response(
+            503,
+            {
+                "error":
+                    "temporarily_unavailable"
+            },
+        )
+
+    return _response(
+        200,
+        {
+            "project":
+                _public_project(
+                    updated
+                ),
+            "clientContact":
+                _resolved_client_contact(
+                    updated
+                ),
+            "changed":
+                changed,
+        },
+    )
+
+
+def _handle_clear_client_contact(
+    event: dict[str, Any],
+    identity: dict[str, Any],
+):
+    try:
+        project_id, project = (
+            _project_from_event(
+                event
+            )
+        )
+
+        if not project_id:
+            return _response(
+                400,
+                {
+                    "error":
+                        "project_id_required"
+                },
+            )
+
+        if not project:
+            return _response(
+                404,
+                {
+                    "error":
+                        "project_not_found"
+                },
+            )
+
+        updated, changed = (
+            _clear_project_client_contact(
+                project,
+                identity["subject"],
+            )
+        )
+
+    except (
+        BotoCoreError,
+        ClientError,
+        RuntimeError,
+    ):
+        LOGGER.exception(
+            "Client contact clear failed"
+        )
+
+        return _response(
+            503,
+            {
+                "error":
+                    "temporarily_unavailable"
+            },
+        )
+
+    return _response(
+        200,
+        {
+            "project":
+                _public_project(
+                    updated
+                ),
+            "clientContact":
+                _resolved_client_contact(
+                    updated
+                ),
+            "changed":
+                changed,
+        },
+    )
+
+
+def _handle_client_preview(
+    event: dict[str, Any],
+    identity: dict[str, Any],
+):
+    try:
+        project_id, project = (
+            _project_from_event(
+                event
+            )
+        )
+
+        if not project_id:
+            return _response(
+                400,
+                {
+                    "error":
+                        "project_id_required"
+                },
+            )
+
+        if not project:
+            return _response(
+                404,
+                {
+                    "error":
+                        "project_not_found"
+                },
+            )
+
+        if not _can_view_project(
+            identity,
+            project,
+        ):
+            return _response(
+                403,
+                {
+                    "error":
+                        "project_access_required"
+                },
+            )
+
+        client_project = (
+            _client_safe_project(
+                project
+            )
+        )
+
+    except (
+        BotoCoreError,
+        ClientError,
+        RuntimeError,
+    ):
+        LOGGER.exception(
+            "Client preview failed"
+        )
+
+        return _response(
+            503,
+            {
+                "error":
+                    "temporarily_unavailable"
+            },
+        )
+
+    return _response(
+        200,
+        {
+            "project":
+                client_project,
+        },
+    )
 
 
 def _update_project_color(
@@ -12308,6 +13361,73 @@ def handler(
         return _handle_unassign_project_member(
             event,
             identity["subject"],
+        )
+
+    if (
+        method == "PATCH"
+        and path.endswith("/phase")
+        and "/v1/admin/projects/"
+            in path
+    ):
+        if identity["role"] not in {
+            "OWNER",
+            "MANAGER",
+        }:
+            return _response(
+                403,
+                {
+                    "error":
+                        "manager_or_owner_required"
+                },
+            )
+
+        return _handle_update_project_phase(
+            event,
+            identity,
+        )
+
+    if (
+        path.endswith(
+            "/client-contact"
+        )
+        and "/v1/admin/projects/"
+            in path
+    ):
+        if identity["role"] not in {
+            "OWNER",
+            "MANAGER",
+        }:
+            return _response(
+                403,
+                {
+                    "error":
+                        "manager_or_owner_required"
+                },
+            )
+
+        if method == "PATCH":
+            return _handle_set_client_contact(
+                event,
+                identity,
+            )
+
+        if method == "DELETE":
+            return _handle_clear_client_contact(
+                event,
+                identity,
+            )
+
+    if (
+        method == "GET"
+        and path.endswith(
+            "/client-preview"
+        )
+        and "/v1/admin/projects/"
+            in path
+    ):
+        return _handle_client_preview(
+            event,
+            identity,
         )
 
     if (

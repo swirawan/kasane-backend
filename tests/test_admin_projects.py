@@ -2471,3 +2471,256 @@ def test_manager_can_regenerate_portal_share():
         ]
         is True
     )
+
+
+
+# PHASE 7 — PROJECT PHASE / CLIENT CONTACT / PREVIEW
+
+def test_project_phase_normalization():
+    assert (
+        admin_app
+        ._normalize_project_phase(
+            "event ready"
+        )
+        == "EVENT_READY"
+    )
+
+    assert (
+        admin_app
+        ._normalize_project_phase(
+            "banana"
+        )
+        == ""
+    )
+
+
+def test_company_email_guard_rejects_personal_email():
+    assert (
+        admin_app
+        ._safe_client_contact_email(
+            "stanley@gmail.com"
+        )
+        == ""
+    )
+
+    assert (
+        admin_app
+        ._safe_client_contact_email(
+            " Stanley@KasaneCollective.com "
+        )
+        ==
+        "stanley@kasanecollective.com"
+    )
+
+
+def test_client_safe_project_does_not_leak_customer_contact():
+    value = project()
+
+    value["email"] = (
+        "client@example.com"
+    )
+    value["phone"] = "+628123"
+
+    with patch.object(
+        admin_app,
+        "_resolved_client_contact",
+        return_value={
+            "userId": "staff-1",
+            "name": "Davin",
+            "role": "Event Lead",
+            "email":
+                "davin@kasanecollective.com",
+        },
+    ):
+        public = (
+            admin_app
+            ._client_safe_project(
+                value
+            )
+        )
+
+    assert "email" not in public
+    assert "phone" not in public
+
+    assert public[
+        "clientContact"
+    ] == {
+        "userId": "staff-1",
+        "name": "Davin",
+        "role": "Event Lead",
+        "email":
+            "davin@kasanecollective.com",
+    }
+
+
+def test_worker_cannot_change_project_phase():
+    with patch.object(
+        admin_app,
+        "_authorize_identity",
+        return_value=(
+            identity("WORKER"),
+            None,
+        ),
+    ):
+        response = admin_app.handler(
+            event(
+                "PATCH",
+                "/v1/admin/projects/"
+                "KAS-001/phase",
+                project_id="KAS-001",
+                payload={
+                    "phase": "DESIGN",
+                },
+            ),
+            None,
+        )
+
+    assert response[
+        "statusCode"
+    ] == 403
+
+
+def test_manager_routes_project_phase_update():
+    with patch.object(
+        admin_app,
+        "_authorize_identity",
+        return_value=(
+            identity("MANAGER"),
+            None,
+        ),
+    ), patch.object(
+        admin_app,
+        "_handle_update_project_phase",
+        return_value=
+            admin_app._response(
+                200,
+                {
+                    "project": {
+                        "phase":
+                            "DESIGN"
+                    },
+                    "changed":
+                        True,
+                },
+            ),
+    ) as mocked:
+        response = admin_app.handler(
+            event(
+                "PATCH",
+                "/v1/admin/projects/"
+                "KAS-001/phase",
+                project_id="KAS-001",
+                payload={
+                    "phase": "DESIGN",
+                },
+            ),
+            None,
+        )
+
+    assert response[
+        "statusCode"
+    ] == 200
+
+    mocked.assert_called_once()
+
+
+def test_manager_routes_client_contact_update():
+    with patch.object(
+        admin_app,
+        "_authorize_identity",
+        return_value=(
+            identity("MANAGER"),
+            None,
+        ),
+    ), patch.object(
+        admin_app,
+        "_handle_set_client_contact",
+        return_value=
+            admin_app._response(
+                200,
+                {
+                    "clientContact": {
+                        "name":
+                            "Davin",
+                    }
+                },
+            ),
+    ) as mocked:
+        response = admin_app.handler(
+            event(
+                "PATCH",
+                "/v1/admin/projects/"
+                "KAS-001/client-contact",
+                project_id="KAS-001",
+                payload={
+                    "userId": "staff-1",
+                    "clientRole":
+                        "Event Lead",
+                    "email":
+                        "davin@"
+                        "kasanecollective.com",
+                },
+            ),
+            None,
+        )
+
+    assert response[
+        "statusCode"
+    ] == 200
+
+    mocked.assert_called_once()
+
+
+def test_view_as_client_uses_safe_serializer():
+    with (
+        patch.object(
+            admin_app,
+            "_project_record",
+            return_value=project(),
+        ),
+        patch.object(
+            admin_app,
+            "_can_view_project",
+            return_value=True,
+        ),
+        patch.object(
+            admin_app,
+            "_resolved_client_contact",
+            return_value={
+                "userId": "staff-1",
+                "name": "Davin",
+                "role": "Event Lead",
+                "email":
+                    "davin@kasanecollective.com",
+            },
+        ),
+    ):
+        response = (
+            admin_app
+            ._handle_client_preview(
+                event(
+                    "GET",
+                    "/v1/admin/projects/"
+                    "KAS-001/client-preview",
+                    project_id="KAS-001",
+                ),
+                identity("OWNER"),
+            )
+        )
+
+    result = body(response)[
+        "project"
+    ]
+
+    assert response[
+        "statusCode"
+    ] == 200
+
+    assert "phone" not in result
+    assert "email" not in result
+
+    assert (
+        result["clientContact"]
+        ["name"]
+        == "Davin"
+    )

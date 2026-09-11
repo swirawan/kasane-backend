@@ -171,9 +171,170 @@ def _client_identity(
     }
 
 
+def _safe_client_contact_email(
+    value: Any,
+) -> str:
+    email = (
+        str(value or "")
+        .strip()
+        .lower()
+    )
+
+    if (
+        not email
+        or not email.endswith(
+            "@kasanecollective.com"
+        )
+    ):
+        return ""
+
+    return email
+
+
+def _resolved_client_contact(
+    project: dict[str, Any],
+) -> dict[str, str]:
+    project_id = str(
+        project.get("projectId")
+        or ""
+    ).strip()
+
+    user_id = str(
+        project.get(
+            "clientContactUserId"
+        )
+        or ""
+    ).strip()
+
+    role = str(
+        project.get(
+            "clientContactRole"
+        )
+        or ""
+    ).strip()
+
+    email = (
+        _safe_client_contact_email(
+            project.get(
+                "clientContactEmail"
+            )
+        )
+    )
+
+    empty = {
+        "userId": "",
+        "name": "",
+        "role": "",
+        "email": "",
+    }
+
+    if (
+        not project_id
+        or not user_id
+    ):
+        return empty
+
+    membership_result = (
+        _ops_table().get_item(
+            Key={
+                "PK":
+                    f"PROJECT#{project_id}",
+                "SK":
+                    f"MEMBER#{user_id}",
+            },
+            ConsistentRead=True,
+        )
+    )
+
+    membership = (
+        membership_result.get(
+            "Item"
+        )
+    )
+
+    if (
+        not isinstance(
+            membership,
+            dict,
+        )
+        or membership.get(
+            "recordType"
+        )
+        != "PROJECT_MEMBERSHIP"
+        or str(
+            membership.get(
+                "membershipStatus"
+            )
+            or ""
+        ).upper()
+        != "ACTIVE"
+    ):
+        return empty
+
+    staff_result = (
+        _ops_table().get_item(
+            Key={
+                "PK":
+                    f"USER#{user_id}",
+                "SK":
+                    "PROFILE",
+            },
+            ConsistentRead=True,
+        )
+    )
+
+    staff = staff_result.get(
+        "Item"
+    )
+
+    if (
+        not isinstance(
+            staff,
+            dict,
+        )
+        or str(
+            staff.get("status")
+            or ""
+        ).upper()
+        != "ACTIVE"
+    ):
+        return empty
+
+    return {
+        "userId":
+            user_id,
+        "name":
+            str(
+                staff.get(
+                    "displayName"
+                )
+                or ""
+            ).strip(),
+        "role":
+            role,
+        "email":
+            email,
+    }
+
+
 def _public_client_project(
     item: dict[str, Any],
+    *,
+    resolve_contact: bool = False,
 ) -> dict[str, Any]:
+    contact = (
+        _resolved_client_contact(
+            item
+        )
+        if resolve_contact
+        else {
+            "userId": "",
+            "name": "",
+            "role": "",
+            "email": "",
+        }
+    )
+
     return {
         "projectId": str(
             item.get("projectId")
@@ -231,32 +392,8 @@ def _public_client_project(
             item.get("updatedAt")
             or ""
         ),
-
-        # Client-safe contact fields.
-        # Admin support comes in the next slice.
-        "clientContact": {
-            "name": str(
-                item.get(
-                    "clientContactName"
-                )
-                or ""
-            ),
-            "role": str(
-                item.get(
-                    "clientContactRole"
-                )
-                or ""
-            ),
-            "email": str(
-                item.get(
-                    "clientContactEmail"
-                )
-                or ""
-            ),
-        },
-
-        # MUSUBI remains invisible until
-        # Admin explicitly publishes it.
+        "clientContact":
+            contact,
         "musubiClientVisible": (
             item.get(
                 "musubiClientVisible"
@@ -463,7 +600,8 @@ def _list_client_projects(
 
         projects.append(
             _public_client_project(
-                project
+                project,
+                resolve_contact=True,
             )
         )
 
@@ -553,7 +691,8 @@ def handler(
             {
                 "project":
                     _public_client_project(
-                        project
+                        project,
+                        resolve_contact=True,
                     )
             },
         )
@@ -669,7 +808,8 @@ def handler(
             {
                 "project":
                     _public_client_project(
-                        project
+                        project,
+                        resolve_contact=True,
                     )
             },
         )

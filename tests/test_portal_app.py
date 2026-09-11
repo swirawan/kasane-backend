@@ -422,3 +422,54 @@ def test_public_serializer_keeps_musubi_hidden_by_default():
         ]
         == ""
     )
+
+
+
+def test_client_facing_contact_never_exposes_personal_email():
+    assert (
+        portal_app
+        ._safe_client_contact_email(
+            "staff@gmail.com"
+        )
+        == ""
+    )
+
+    assert (
+        portal_app
+        ._safe_client_contact_email(
+            "agent@kasanecollective.com"
+        )
+        ==
+        "agent@kasanecollective.com"
+    )
+
+
+def test_public_client_project_can_include_safe_agent_contact():
+    with patch.object(
+        portal_app,
+        "_resolved_client_contact",
+        return_value={
+            "userId": "staff-1",
+            "name": "Davin",
+            "role": "Event Lead",
+            "email":
+                "davin@kasanecollective.com",
+        },
+    ):
+        result = (
+            portal_app
+            ._public_client_project(
+                project(),
+                resolve_contact=True,
+            )
+        )
+
+    assert result[
+        "clientContact"
+    ] == {
+        "userId": "staff-1",
+        "name": "Davin",
+        "role": "Event Lead",
+        "email":
+            "davin@kasanecollective.com",
+    }
