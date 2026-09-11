@@ -2293,6 +2293,76 @@ def _project_scope_from_lead(
     }
 
 
+
+def _client_access_partition_key(
+    email: str,
+) -> str:
+    normalized = str(
+        email or ""
+    ).strip().lower()
+
+    if not normalized:
+        return ""
+
+    digest = hashlib.sha256(
+        normalized.encode("utf-8")
+    ).hexdigest()
+
+    return (
+        "CLIENT#EMAIL#"
+        f"{digest}"
+    )
+
+
+def _client_project_access_item(
+    lead: dict[str, Any],
+    project_id: str,
+    now: str,
+    actor_subject: str,
+) -> dict[str, Any] | None:
+    email = str(
+        lead.get("email")
+        or ""
+    ).strip().lower()
+
+    partition_key = (
+        _client_access_partition_key(
+            email
+        )
+    )
+
+    if not partition_key:
+        return None
+
+    return {
+        "PK":
+            partition_key,
+        "SK":
+            f"PROJECT#{project_id}",
+        "recordType":
+            "CLIENT_PROJECT_ACCESS",
+        "projectId":
+            project_id,
+        "clientEmail":
+            email,
+        "leadReference":
+            str(
+                lead.get("reference")
+                or ""
+            ),
+        "status":
+            "ACTIVE",
+        "createdAt":
+            now,
+        "createdBy":
+            actor_subject,
+        "updatedAt":
+            now,
+        "updatedBy":
+            actor_subject,
+    }
+
+
 def _convert_lead(
     lead: dict[str, Any],
     actor_subject: str,
@@ -2422,99 +2492,135 @@ def _convert_lead(
             ),
         }
 
+        client_access = (
+            _client_project_access_item(
+                lead,
+                project_id,
+                now,
+                actor_subject,
+            )
+        )
+
+        transaction_items = [
+            {
+                "Put": {
+                    "TableName":
+                        OPS_TABLE_NAME,
+                    "Item":
+                        _serialize_map(
+                            project
+                        ),
+                    "ConditionExpression": (
+                        "attribute_not_exists("
+                        "PK)"
+                    ),
+                }
+            },
+        ]
+
+        if client_access:
+            transaction_items.append(
+                {
+                    "Put": {
+                        "TableName":
+                            OPS_TABLE_NAME,
+                        "Item":
+                            _serialize_map(
+                                client_access
+                            ),
+                        "ConditionExpression": (
+                            "attribute_not_exists("
+                            "PK) AND "
+                            "attribute_not_exists("
+                            "SK)"
+                        ),
+                    }
+                }
+            )
+
+        transaction_items.append(
+            {
+                "Update": {
+                    "TableName":
+                        OPS_TABLE_NAME,
+                    "Key":
+                        _serialize_map({
+                            "PK":
+                                f"LEAD#{reference}",
+                            "SK":
+                                "STATE",
+                        }),
+                    "UpdateExpression": (
+                        "SET "
+                        "recordType = "
+                        "if_not_exists("
+                        "recordType, "
+                        ":record_type), "
+                        "leadReference = "
+                        "if_not_exists("
+                        "leadReference, "
+                        ":reference), "
+                        "#status = :won, "
+                        "convertedProjectId = "
+                        ":project_id, "
+                        "createdAt = "
+                        "if_not_exists("
+                        "createdAt, :now), "
+                        "createdBy = "
+                        "if_not_exists("
+                        "createdBy, :actor), "
+                        "updatedAt = :now, "
+                        "updatedBy = :actor, "
+                        "GSI3PK = :gsi_pk, "
+                        "GSI3SK = :gsi_sk"
+                    ),
+                    "ConditionExpression": (
+                        "attribute_not_exists("
+                        "convertedProjectId) "
+                        "AND ("
+                        "attribute_not_exists("
+                        "#status) "
+                        "OR #status <> :lost)"
+                    ),
+                    "ExpressionAttributeNames": {
+                        "#status": "status",
+                    },
+                    "ExpressionAttributeValues":
+                        _serialize_map({
+                            ":record_type":
+                                "LEAD_STATE",
+                            ":reference":
+                                reference,
+                            ":won":
+                                "WON",
+                            ":lost":
+                                "LOST",
+                            ":project_id":
+                                project_id,
+                            ":now":
+                                now,
+                            ":actor":
+                                actor_subject,
+                            ":gsi_pk":
+                                "LEADS#STATUS#WON",
+                            ":gsi_sk":
+                                (
+                                    f"UPDATED#{now}"
+                                    f"#LEAD#{reference}"
+                                ),
+                        }),
+                }
+            }
+        )
+
         try:
             boto3.client(
                 "dynamodb"
             ).transact_write_items(
-                TransactItems=[
-                    {
-                        "Put": {
-                            "TableName":
-                                OPS_TABLE_NAME,
-                            "Item":
-                                _serialize_map(
-                                    project
-                                ),
-                            "ConditionExpression": (
-                                "attribute_not_exists("
-                                "PK)"
-                            ),
-                        }
-                    },
-                    {
-                        "Update": {
-                            "TableName":
-                                OPS_TABLE_NAME,
-                            "Key":
-                                _serialize_map({
-                                    "PK":
-                                        f"LEAD#{reference}",
-                                    "SK":
-                                        "STATE",
-                                }),
-                            "UpdateExpression": (
-                                "SET "
-                                "recordType = "
-                                "if_not_exists("
-                                "recordType, "
-                                ":record_type), "
-                                "leadReference = "
-                                "if_not_exists("
-                                "leadReference, "
-                                ":reference), "
-                                "#status = :won, "
-                                "convertedProjectId = "
-                                ":project_id, "
-                                "createdAt = "
-                                "if_not_exists("
-                                "createdAt, :now), "
-                                "createdBy = "
-                                "if_not_exists("
-                                "createdBy, :actor), "
-                                "updatedAt = :now, "
-                                "updatedBy = :actor, "
-                                "GSI3PK = :gsi_pk, "
-                                "GSI3SK = :gsi_sk"
-                            ),
-                            "ConditionExpression": (
-                                "attribute_not_exists("
-                                "convertedProjectId) "
-                                "AND ("
-                                "attribute_not_exists("
-                                "#status) "
-                                "OR #status <> :lost)"
-                            ),
-                            "ExpressionAttributeNames": {
-                                "#status": "status",
-                            },
-                            "ExpressionAttributeValues":
-                                _serialize_map({
-                                    ":record_type":
-                                        "LEAD_STATE",
-                                    ":reference":
-                                        reference,
-                                    ":won":
-                                        "WON",
-                                    ":lost":
-                                        "LOST",
-                                    ":project_id":
-                                        project_id,
-                                    ":now":
-                                        now,
-                                    ":actor":
-                                        actor_subject,
-                                    ":gsi_pk":
-                                        "LEADS#STATUS#WON",
-                                    ":gsi_sk":
-                                        (
-                                            f"UPDATED#{now}"
-                                            f"#LEAD#{reference}"
-                                        ),
-                                }),
-                        }
-                    },
-                ]
+                TransactItems=
+                    transaction_items
             )
+
 
             return project, True
 

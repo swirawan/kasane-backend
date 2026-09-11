@@ -1837,3 +1837,220 @@ def test_public_project_defaults_client_brief_blank():
     )
 
     assert result["clientBrief"] == ""
+
+
+
+# PHASE 7 CLIENT PROJECT ACCESS
+
+def test_client_access_partition_key_normalizes_email():
+    first = (
+        admin_app
+        ._client_access_partition_key(
+            " Alya@Example.COM "
+        )
+    )
+
+    second = (
+        admin_app
+        ._client_access_partition_key(
+            "alya@example.com"
+        )
+    )
+
+    assert first == second
+
+    assert first.startswith(
+        "CLIENT#EMAIL#"
+    )
+
+    assert (
+        "alya@example.com"
+        not in first
+    )
+
+
+def test_client_access_item_requires_email():
+    item = lead()
+    item["email"] = ""
+
+    result = (
+        admin_app
+        ._client_project_access_item(
+            item,
+            "KAS-001",
+            "2026-09-11T12:00:00+00:00",
+            "user-1",
+        )
+    )
+
+    assert result is None
+
+
+def test_conversion_transaction_creates_client_access():
+    with (
+        patch.object(
+            admin_app,
+            "_lead_state",
+            return_value=None,
+        ),
+        patch.object(
+            admin_app,
+            "_next_project_id",
+            return_value="KAS-001",
+        ),
+        patch.object(
+            admin_app,
+            "_utcnow",
+            return_value=(
+                "2026-09-11T12:00:00+00:00"
+            ),
+        ),
+        patch.object(
+            admin_app.boto3,
+            "client",
+        ) as client_factory,
+    ):
+        converted, created = (
+            admin_app._convert_lead(
+                lead(),
+                "user-1",
+            )
+        )
+
+    assert created is True
+    assert (
+        converted["projectId"]
+        == "KAS-001"
+    )
+
+    dynamodb = (
+        client_factory.return_value
+    )
+
+    dynamodb.transact_write_items\
+        .assert_called_once()
+
+    transaction_items = (
+        dynamodb
+        .transact_write_items
+        .call_args
+        .kwargs[
+            "TransactItems"
+        ]
+    )
+
+    assert len(
+        transaction_items
+    ) == 3
+
+    access_item = (
+        transaction_items[1]
+        ["Put"]["Item"]
+    )
+
+    assert (
+        access_item[
+            "recordType"
+        ]["S"]
+        == "CLIENT_PROJECT_ACCESS"
+    )
+
+    assert (
+        access_item[
+            "projectId"
+        ]["S"]
+        == "KAS-001"
+    )
+
+    assert (
+        access_item[
+            "clientEmail"
+        ]["S"]
+        == "alya@example.com"
+    )
+
+    assert (
+        access_item["SK"]["S"]
+        == "PROJECT#KAS-001"
+    )
+
+    assert (
+        access_item["PK"]["S"]
+        .startswith(
+            "CLIENT#EMAIL#"
+        )
+    )
+
+    assert (
+        "alya@example.com"
+        not in
+        access_item["PK"]["S"]
+    )
+
+
+def test_conversion_without_email_skips_client_access():
+    item = lead()
+    item["email"] = ""
+
+    with (
+        patch.object(
+            admin_app,
+            "_lead_state",
+            return_value=None,
+        ),
+        patch.object(
+            admin_app,
+            "_next_project_id",
+            return_value="KAS-001",
+        ),
+        patch.object(
+            admin_app,
+            "_utcnow",
+            return_value=(
+                "2026-09-11T12:00:00+00:00"
+            ),
+        ),
+        patch.object(
+            admin_app.boto3,
+            "client",
+        ) as client_factory,
+    ):
+        converted, created = (
+            admin_app._convert_lead(
+                item,
+                "user-1",
+            )
+        )
+
+    assert created is True
+
+    transaction_items = (
+        client_factory
+        .return_value
+        .transact_write_items
+        .call_args
+        .kwargs[
+            "TransactItems"
+        ]
+    )
+
+    assert len(
+        transaction_items
+    ) == 2
+
+    record_types = [
+        tx.get("Put", {})
+        .get("Item", {})
+        .get(
+            "recordType",
+            {},
+        )
+        .get("S")
+        for tx in transaction_items
+        if "Put" in tx
+    ]
+
+    assert (
+        "CLIENT_PROJECT_ACCESS"
+        not in record_types
+    )
