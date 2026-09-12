@@ -516,3 +516,74 @@ def test_unavailable_vendor_cannot_be_linked():
     assert body["error"] == (
         "vendor_unavailable"
     )
+
+
+
+def test_project_vendor_client_visibility_defaults_private():
+    result = (
+        admin_app
+        ._project_vendor_request_fields(
+            {},
+            partial=False,
+        )
+    )
+
+    assert result["clientVisible"] is False
+
+
+def test_project_vendor_client_visibility_can_be_updated():
+    result = (
+        admin_app
+        ._project_vendor_request_fields(
+            {
+                "clientVisible": True,
+            },
+            partial=True,
+        )
+    )
+
+    assert result == {
+        "clientVisible": True,
+    }
+
+
+def test_project_vendor_client_visibility_rejects_non_boolean():
+    try:
+        (
+            admin_app
+            ._project_vendor_request_fields(
+                {
+                    "clientVisible":
+                        "true",
+                },
+                partial=True,
+            )
+        )
+
+    except ValueError as exc:
+        assert str(exc) == (
+            "invalid_clientVisible"
+        )
+
+    else:
+        raise AssertionError(
+            "Expected invalid client visibility"
+        )
+
+
+def test_project_vendor_serializer_includes_visibility():
+    item = relationship()
+
+    item["clientVisible"] = True
+
+    public = (
+        admin_app
+        ._public_project_vendor(
+            item,
+            vendor(),
+        )
+    )
+
+    assert public[
+        "clientVisible"
+    ] is True

@@ -321,6 +321,7 @@ def _public_client_project(
     item: dict[str, Any],
     *,
     resolve_contact: bool = False,
+    resolve_vendors: bool = False,
 ) -> dict[str, Any]:
     contact = (
         _resolved_client_contact(
@@ -333,6 +334,17 @@ def _public_client_project(
             "role": "",
             "email": "",
         }
+    )
+
+    vendors = (
+        _client_visible_vendors(
+            str(
+                item.get("projectId")
+                or ""
+            )
+        )
+        if resolve_vendors
+        else []
     )
 
     return {
@@ -394,6 +406,8 @@ def _public_client_project(
         ),
         "clientContact":
             contact,
+        "clientVendors":
+            vendors,
         "musubiClientVisible": (
             item.get(
                 "musubiClientVisible"
@@ -511,6 +525,131 @@ def _project_record(
         return None
 
     return item
+
+
+def _client_visible_vendors(
+    project_id: str,
+) -> list[dict[str, str]]:
+    if not project_id:
+        return []
+
+    response = _ops_table().query(
+        KeyConditionExpression=(
+            "PK = :pk AND "
+            "begins_with(SK, :prefix)"
+        ),
+        ExpressionAttributeValues={
+            ":pk":
+                f"PROJECT#{project_id}",
+            ":prefix":
+                "VENDOR#",
+        },
+        ConsistentRead=True,
+    )
+
+    result = []
+
+    for relation in (
+        response.get("Items")
+        or []
+    ):
+        if (
+            not isinstance(
+                relation,
+                dict,
+            )
+            or relation.get(
+                "recordType"
+            )
+                != "PROJECT_VENDOR"
+            or str(
+                relation.get(
+                    "relationshipStatus"
+                )
+                or ""
+            ).upper()
+                != "ACTIVE"
+            or relation.get(
+                "clientVisible"
+            )
+                is not True
+        ):
+            continue
+
+        vendor_id = str(
+            relation.get("vendorId")
+            or ""
+        ).strip()
+
+        if not vendor_id:
+            continue
+
+        vendor_result = (
+            _ops_table().get_item(
+                Key={
+                    "PK":
+                        f"VENDOR#{vendor_id}",
+                    "SK":
+                        "PROFILE",
+                },
+                ConsistentRead=True,
+            )
+        )
+
+        vendor = vendor_result.get(
+            "Item"
+        )
+
+        if (
+            not isinstance(
+                vendor,
+                dict,
+            )
+            or vendor.get(
+                "recordType"
+            )
+                != "VENDOR"
+            or str(
+                vendor.get("status")
+                or "ACTIVE"
+            ).upper()
+                != "ACTIVE"
+        ):
+            continue
+
+        name = str(
+            vendor.get("name")
+            or ""
+        ).strip()
+
+        if not name:
+            continue
+
+        category = str(
+            relation.get("category")
+            or vendor.get("category")
+            or ""
+        ).strip()
+
+        result.append(
+            {
+                "vendorId":
+                    vendor_id,
+                "name":
+                    name,
+                "category":
+                    category,
+            }
+        )
+
+    return sorted(
+        result,
+        key=lambda item: (
+            item["category"],
+            item["name"].casefold(),
+            item["vendorId"],
+        ),
+    )
 
 
 def _shared_project(
@@ -693,6 +832,7 @@ def handler(
                     _public_client_project(
                         project,
                         resolve_contact=True,
+                        resolve_vendors=True,
                     )
             },
         )
@@ -810,6 +950,7 @@ def handler(
                     _public_client_project(
                         project,
                         resolve_contact=True,
+                        resolve_vendors=True,
                     )
             },
         )

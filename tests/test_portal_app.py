@@ -289,6 +289,11 @@ def test_project_detail_returns_safe_project():
             "_project_record",
             return_value=project(),
         ),
+        patch.object(
+            portal_app,
+            "_client_visible_vendors",
+            return_value=[],
+        ),
     ):
         response = portal_app.handler(
             event(
@@ -360,10 +365,17 @@ def test_share_partition_key_does_not_expose_token():
 
 
 def test_public_share_does_not_require_auth():
-    with patch.object(
-        portal_app,
-        "_shared_project",
-        return_value=project(),
+    with (
+        patch.object(
+            portal_app,
+            "_shared_project",
+            return_value=project(),
+        ),
+        patch.object(
+            portal_app,
+            "_client_visible_vendors",
+            return_value=[],
+        ),
     ):
         response = portal_app.handler(
             share_event(),
@@ -473,3 +485,226 @@ def test_public_client_project_can_include_safe_agent_contact():
         "email":
             "davin@kasanecollective.com",
     }
+
+
+
+class FakeClientVendorTable:
+    def query(
+        self,
+        **kwargs,
+    ):
+        return {
+            "Items": [
+                {
+                    "recordType":
+                        "PROJECT_VENDOR",
+                    "projectId":
+                        "KAS-001",
+                    "vendorId":
+                        "VEN-VISIBLE",
+                    "relationshipStatus":
+                        "ACTIVE",
+                    "category":
+                        "CATERING",
+                    "clientVisible":
+                        True,
+
+                    # Internal fields that MUST
+                    # never reach the client.
+                    "operationalStatus":
+                        "SHORTLISTED",
+                    "bookingStatus":
+                        "CONFIRMED",
+                    "quoteAmount":
+                        50000000,
+                    "depositAmount":
+                        10000000,
+                    "notes":
+                        "Internal negotiation",
+                },
+                {
+                    "recordType":
+                        "PROJECT_VENDOR",
+                    "projectId":
+                        "KAS-001",
+                    "vendorId":
+                        "VEN-HIDDEN",
+                    "relationshipStatus":
+                        "ACTIVE",
+                    "category":
+                        "PHOTO_VIDEO",
+                    "clientVisible":
+                        False,
+                },
+            ]
+        }
+
+    def get_item(
+        self,
+        *,
+        Key,
+        ConsistentRead,
+    ):
+        assert ConsistentRead is True
+
+        if (
+            Key["PK"]
+            == "VENDOR#VEN-VISIBLE"
+        ):
+            return {
+                "Item": {
+                    "recordType":
+                        "VENDOR",
+                    "vendorId":
+                        "VEN-VISIBLE",
+                    "name":
+                        "Royal Catering",
+                    "category":
+                        "CATERING",
+                    "status":
+                        "ACTIVE",
+
+                    # Vendor-private data.
+                    "phone":
+                        "+628123",
+                    "whatsapp":
+                        "+628123",
+                    "email":
+                        "private@example.com",
+                    "pricingNotes":
+                        "Do not expose",
+                    "internalNotes":
+                        "Do not expose",
+                }
+            }
+
+        raise AssertionError(
+            f"Unexpected vendor read: {Key}"
+        )
+
+
+def test_client_visible_vendors_are_safe():
+    table = FakeClientVendorTable()
+
+    with patch.object(
+        portal_app,
+        "_ops_table",
+        return_value=table,
+    ):
+        result = (
+            portal_app
+            ._client_visible_vendors(
+                "KAS-001"
+            )
+        )
+
+    assert result == [
+        {
+            "vendorId":
+                "VEN-VISIBLE",
+            "name":
+                "Royal Catering",
+            "category":
+                "CATERING",
+        }
+    ]
+
+    serialized = json.dumps(
+        result
+    )
+
+    for forbidden in (
+        "SHORTLISTED",
+        "CONFIRMED",
+        "50000000",
+        "10000000",
+        "Internal negotiation",
+        "+628123",
+        "private@example.com",
+        "Do not expose",
+    ):
+        assert forbidden not in serialized
+
+
+def test_public_project_can_resolve_client_vendors():
+    safe_vendors = [
+        {
+            "vendorId":
+                "VEN-VISIBLE",
+            "name":
+                "Royal Catering",
+            "category":
+                "CATERING",
+        }
+    ]
+
+    with patch.object(
+        portal_app,
+        "_client_visible_vendors",
+        return_value=safe_vendors,
+    ) as mocked:
+        result = (
+            portal_app
+            ._public_client_project(
+                project(),
+                resolve_vendors=True,
+            )
+        )
+
+    mocked.assert_called_once_with(
+        "KAS-001"
+    )
+
+    assert (
+        result["clientVendors"]
+        == safe_vendors
+    )
+
+
+def test_public_share_includes_client_visible_vendors():
+    safe_vendors = [
+        {
+            "vendorId":
+                "VEN-VISIBLE",
+            "name":
+                "Royal Catering",
+            "category":
+                "CATERING",
+        }
+    ]
+
+    with (
+        patch.object(
+            portal_app,
+            "_shared_project",
+            return_value=project(),
+        ),
+        patch.object(
+            portal_app,
+            "_resolved_client_contact",
+            return_value={
+                "userId": "",
+                "name": "",
+                "role": "",
+                "email": "",
+            },
+        ),
+        patch.object(
+            portal_app,
+            "_client_visible_vendors",
+            return_value=safe_vendors,
+        ),
+    ):
+        response = portal_app.handler(
+            share_event(),
+            None,
+        )
+
+    assert response["statusCode"] == 200
+
+    result = body(response)["project"]
+
+    assert (
+        result["clientVendors"]
+        == safe_vendors
+    )

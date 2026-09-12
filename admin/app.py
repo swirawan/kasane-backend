@@ -11577,6 +11577,26 @@ def _project_vendor_request_fields(
 
         result["notes"] = notes
 
+    if (
+        not partial
+        or "clientVisible" in body
+    ):
+        value = (
+            body.get("clientVisible")
+            if "clientVisible" in body
+            else False
+        )
+
+        if not isinstance(
+            value,
+            bool,
+        ):
+            raise ValueError(
+                "invalid_clientVisible"
+            )
+
+        result["clientVisible"] = value
+
     return result
 
 
@@ -11612,6 +11632,10 @@ def _public_project_vendor(
         "bookingStatus": str(
             item.get("bookingStatus")
             or "NOT_STARTED"
+        ),
+        "clientVisible": (
+            item.get("clientVisible")
+            is True
         ),
         "quoteAmount": int(
             item.get("quoteAmount")
@@ -12024,6 +12048,7 @@ def _link_project_vendor(
             "category",
             "operationalStatus",
             "bookingStatus",
+            "clientVisible",
             "quoteAmount",
             "depositAmount",
             "notes",
