@@ -571,8 +571,10 @@ class FakeClientVendorTable:
                         "Royal Catering",
                     "category":
                         "CATERING",
+                    # Global directory status does not
+                    # override explicit project visibility.
                     "status":
-                        "ACTIVE",
+                        "INACTIVE",
 
                     # Vendor-private data.
                     "phone":
@@ -824,7 +826,7 @@ class FakePreferredClientVendorTable:
         }
 
 
-def test_client_visible_vendors_allows_active_and_preferred():
+def test_client_visible_vendors_follow_project_visibility():
     with patch.object(
         portal_app,
         "_ops_table",
@@ -844,6 +846,7 @@ def test_client_visible_vendors_allows_active_and_preferred():
         for item in result
     ] == [
         "VEN-ACTIVE",
+        "VEN-INACTIVE",
         "VEN-PREFERRED",
     ]
 
@@ -852,5 +855,6 @@ def test_client_visible_vendors_allows_active_and_preferred():
         for item in result
     ] == [
         "Active Catering",
+        "Inactive Catering",
         "Preferred Catering",
     ]
