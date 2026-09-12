@@ -708,3 +708,134 @@ def test_public_share_includes_client_visible_vendors():
         result["clientVendors"]
         == safe_vendors
     )
+
+
+
+class FakePreferredClientVendorTable:
+    def query(
+        self,
+        **kwargs,
+    ):
+        return {
+            "Items": [
+                {
+                    "recordType":
+                        "PROJECT_VENDOR",
+                    "vendorId":
+                        "VEN-ACTIVE",
+                    "relationshipStatus":
+                        "ACTIVE",
+                    "category":
+                        "CATERING",
+                    "clientVisible":
+                        True,
+                },
+                {
+                    "recordType":
+                        "PROJECT_VENDOR",
+                    "vendorId":
+                        "VEN-PREFERRED",
+                    "relationshipStatus":
+                        "ACTIVE",
+                    "category":
+                        "CATERING",
+                    "clientVisible":
+                        True,
+                },
+                {
+                    "recordType":
+                        "PROJECT_VENDOR",
+                    "vendorId":
+                        "VEN-INACTIVE",
+                    "relationshipStatus":
+                        "ACTIVE",
+                    "category":
+                        "CATERING",
+                    "clientVisible":
+                        True,
+                },
+            ]
+        }
+
+    def get_item(
+        self,
+        *,
+        Key,
+        ConsistentRead,
+    ):
+        assert ConsistentRead is True
+
+        vendor_id = (
+            Key["PK"]
+            .removeprefix("VENDOR#")
+        )
+
+        statuses = {
+            "VEN-ACTIVE":
+                "ACTIVE",
+            "VEN-PREFERRED":
+                "PREFERRED",
+            "VEN-INACTIVE":
+                "INACTIVE",
+        }
+
+        names = {
+            "VEN-ACTIVE":
+                "Active Catering",
+            "VEN-PREFERRED":
+                "Preferred Catering",
+            "VEN-INACTIVE":
+                "Inactive Catering",
+        }
+
+        if vendor_id not in statuses:
+            raise AssertionError(
+                f"Unexpected vendor: {Key}"
+            )
+
+        return {
+            "Item": {
+                "recordType":
+                    "VENDOR",
+                "vendorId":
+                    vendor_id,
+                "name":
+                    names[vendor_id],
+                "category":
+                    "CATERING",
+                "status":
+                    statuses[vendor_id],
+            }
+        }
+
+
+def test_client_visible_vendors_allows_active_and_preferred():
+    with patch.object(
+        portal_app,
+        "_ops_table",
+        return_value=(
+            FakePreferredClientVendorTable()
+        ),
+    ):
+        result = (
+            portal_app
+            ._client_visible_vendors(
+                "KAS-001"
+            )
+        )
+
+    assert [
+        item["vendorId"]
+        for item in result
+    ] == [
+        "VEN-ACTIVE",
+        "VEN-PREFERRED",
+    ]
+
+    assert [
+        item["name"]
+        for item in result
+    ] == [
+        "Active Catering",
+        "Preferred Catering",
+    ]

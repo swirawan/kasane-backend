@@ -21,6 +21,12 @@ SHARE_ID_PATTERN = re.compile(
 )
 
 
+CLIENT_VISIBLE_VENDOR_STATUSES = {
+    "ACTIVE",
+    "PREFERRED",
+}
+
+
 def _ops_table():
     global _ops_ddb
 
@@ -613,7 +619,7 @@ def _client_visible_vendors(
                 vendor.get("status")
                 or "ACTIVE"
             ).upper()
-                != "ACTIVE"
+                not in CLIENT_VISIBLE_VENDOR_STATUSES
         ):
             continue
 
