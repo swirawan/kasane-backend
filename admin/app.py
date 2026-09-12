@@ -2795,6 +2795,60 @@ def _transition_project(
             target_status,
     }
 
+    portal_share_key = str(
+        current.get("portalShareKey")
+        or ""
+    ).strip()
+
+    portal_share_status = str(
+        current.get("portalShareStatus")
+        or "DISABLED"
+    ).strip().upper()
+
+    revoke_portal_share = (
+        action in {
+            "complete",
+            "cancel",
+        }
+        and (
+            portal_share_status == "ACTIVE"
+            or bool(portal_share_key)
+        )
+    )
+
+    if revoke_portal_share:
+        values[":portal_disabled"] = (
+            "DISABLED"
+        )
+        values[
+            ":portal_disabled_at"
+        ] = now
+
+        set_parts.extend([
+            (
+                "portalShareStatus = "
+                ":portal_disabled"
+            ),
+            (
+                "portalShareDisabledAt = "
+                ":portal_disabled_at"
+            ),
+            (
+                "portalShareUpdatedAt = "
+                ":portal_disabled_at"
+            ),
+        ])
+
+        remove_parts.extend([
+            "portalShareKey",
+            "portalShareId",
+            "portalShareSuffix",
+        ])
+
+        metadata[
+            "portalShareRevoked"
+        ] = True
+
     if action == "complete":
         values[":completed"] = now
         values[":note"] = note
@@ -2941,6 +2995,28 @@ def _transition_project(
         "dynamodb"
     ).transact_write_items(
         TransactItems=[
+            *(
+                [
+                    {
+                        "Delete": {
+                            "TableName":
+                                OPS_TABLE_NAME,
+                            "Key":
+                                _serialize_map({
+                                    "PK":
+                                        portal_share_key,
+                                    "SK":
+                                        "META",
+                                }),
+                        }
+                    }
+                ]
+                if (
+                    revoke_portal_share
+                    and portal_share_key
+                )
+                else []
+            ),
             {
                 "Update": {
                     "TableName":
@@ -3301,6 +3377,17 @@ def _handle_project_lifecycle(
             identity["subject"],
             note,
         )
+
+        if action in {
+            "complete",
+            "cancel",
+        }:
+            updated, _ = (
+                _disable_portal_share(
+                    updated,
+                    identity["subject"],
+                )
+            )
 
     except ProjectLifecycleConflict as exc:
         return _response(
@@ -3885,6 +3972,18 @@ def _handle_enable_portal_share(
                 {
                     "error":
                         "project_not_found"
+                },
+            )
+
+        if str(
+            project.get("status")
+            or ""
+        ).upper() != "ACTIVE":
+            return _response(
+                409,
+                {
+                    "error":
+                        "project_not_active"
                 },
             )
 

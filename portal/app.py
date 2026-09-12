@@ -676,9 +676,44 @@ def _shared_project(
     if not project_id:
         return None
 
-    return _project_record(
+    project = _project_record(
         project_id
     )
+
+    if not project:
+        return None
+
+    if str(
+        project.get("status")
+        or ""
+    ).strip().upper() != "ACTIVE":
+        return None
+
+    if str(
+        project.get(
+            "portalShareStatus"
+        )
+        or ""
+    ).strip().upper() != "ACTIVE":
+        return None
+
+    current_share_id = str(
+        project.get(
+            "portalShareId"
+        )
+        or ""
+    ).strip()
+
+    if (
+        not current_share_id
+        or current_share_id
+        != str(
+            share_id or ""
+        ).strip()
+    ):
+        return None
+
+    return project
 
 
 def _list_client_access(
