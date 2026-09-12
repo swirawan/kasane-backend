@@ -12914,6 +12914,105 @@ def _handle_unlink_project_vendor(
     )
 
 
+
+PROJECT_LIFECYCLE_WRITE_SUFFIXES = {
+    "/complete",
+    "/cancel",
+    "/reopen",
+    "/archive",
+    "/restore",
+}
+
+
+def _project_write_lock_error(
+    event: dict[str, Any],
+    method: str,
+    path: str,
+):
+    # Unit tests intentionally run without an
+    # operations table configured. Production
+    # always has OPS_TABLE_NAME.
+    if not OPS_TABLE_NAME:
+        return None
+
+    if method not in {
+        "POST",
+        "PATCH",
+        "DELETE",
+    }:
+        return None
+
+    if (
+        "/v1/admin/projects/"
+        not in path
+    ):
+        return None
+
+    if any(
+        path.endswith(suffix)
+        for suffix
+        in PROJECT_LIFECYCLE_WRITE_SUFFIXES
+    ):
+        return None
+
+    parameters = (
+        event.get("pathParameters")
+        or {}
+    )
+
+    project_id = str(
+        parameters.get("projectId")
+        or ""
+    ).strip()
+
+    if not project_id:
+        return None
+
+    try:
+        project = _project_record(
+            project_id
+        )
+
+    except (
+        BotoCoreError,
+        ClientError,
+        RuntimeError,
+    ):
+        LOGGER.exception(
+            "Failed to validate "
+            "project write lock"
+        )
+
+        return _response(
+            503,
+            {
+                "error":
+                    "temporarily_unavailable"
+            },
+        )
+
+    if not project:
+        return None
+
+    status = str(
+        project.get("status")
+        or "ACTIVE"
+    ).strip().upper()
+
+    if status != "ACTIVE":
+        return _response(
+            409,
+            {
+                "error":
+                    "project_locked",
+                "projectStatus":
+                    status,
+            },
+        )
+
+    return None
+
+
 def handler(
     event: dict[str, Any],
     context: Any,
@@ -12949,6 +13048,17 @@ def handler(
         return error
 
     assert identity is not None
+
+    project_lock_error = (
+        _project_write_lock_error(
+            event,
+            method,
+            path,
+        )
+    )
+
+    if project_lock_error:
+        return project_lock_error
 
     if (
         method == "GET"
