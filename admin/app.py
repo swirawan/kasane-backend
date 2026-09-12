@@ -1154,6 +1154,19 @@ def _client_safe_project(
             _resolved_client_contact(
                 project
             ),
+        "clientUpdates": (
+            _list_project_client_updates(
+                str(
+                    project.get(
+                        "projectId"
+                    )
+                    or ""
+                ),
+                published_only=True,
+            )
+            if OPS_TABLE_NAME
+            else []
+        ),
         "musubiClientVisible": (
             project.get(
                 "musubiClientVisible"
@@ -12915,6 +12928,995 @@ def _handle_unlink_project_vendor(
 
 
 
+# ============================================================
+# PHASE 7.2 — CLIENT-FACING PROJECT UPDATES
+# ============================================================
+
+CLIENT_UPDATE_STATUSES = (
+    "DRAFT",
+    "PUBLISHED",
+)
+
+
+def _public_client_update(
+    item: dict[str, Any],
+) -> dict[str, Any]:
+    return {
+        "updateId": str(
+            item.get("updateId")
+            or ""
+        ),
+        "projectId": str(
+            item.get("projectId")
+            or ""
+        ),
+        "body": str(
+            item.get("body")
+            or ""
+        ),
+        "status": str(
+            item.get("status")
+            or ""
+        ),
+        "authorUserId": str(
+            item.get("authorUserId")
+            or ""
+        ),
+        "authorName": str(
+            item.get("authorName")
+            or ""
+        ),
+        "authorRole": str(
+            item.get("authorRole")
+            or ""
+        ),
+        "createdAt": str(
+            item.get("createdAt")
+            or ""
+        ),
+        "updatedAt": str(
+            item.get("updatedAt")
+            or ""
+        ),
+        "publishedAt": str(
+            item.get("publishedAt")
+            or ""
+        ),
+    }
+
+
+def _client_update_record(
+    project_id: str,
+    update_id: str,
+) -> dict[str, Any] | None:
+    if (
+        not project_id
+        or not update_id
+        or not update_id.startswith(
+            "UPD-"
+        )
+        or len(update_id) > 80
+    ):
+        return None
+
+    result = _ops_table().get_item(
+        Key={
+            "PK":
+                f"PROJECT#{project_id}",
+            "SK":
+                f"CLIENTUPDATE#{update_id}",
+        },
+        ConsistentRead=True,
+    )
+
+    item = result.get("Item")
+
+    if (
+        not isinstance(item, dict)
+        or item.get("recordType")
+            != "CLIENT_UPDATE"
+    ):
+        return None
+
+    return item
+
+
+def _list_project_client_updates(
+    project_id: str,
+    *,
+    published_only: bool = False,
+) -> list[dict[str, Any]]:
+    result = _ops_table().query(
+        KeyConditionExpression=(
+            "PK = :pk AND "
+            "begins_with(SK, :prefix)"
+        ),
+        ExpressionAttributeValues={
+            ":pk":
+                f"PROJECT#{project_id}",
+            ":prefix":
+                "CLIENTUPDATE#",
+        },
+        ConsistentRead=True,
+    )
+
+    items = []
+
+    for item in (
+        result.get("Items")
+        or []
+    ):
+        if (
+            not isinstance(item, dict)
+            or item.get("recordType")
+                != "CLIENT_UPDATE"
+        ):
+            continue
+
+        status = str(
+            item.get("status")
+            or ""
+        ).strip().upper()
+
+        if (
+            published_only
+            and status != "PUBLISHED"
+        ):
+            continue
+
+        items.append(
+            _public_client_update(
+                item
+            )
+        )
+
+    items.sort(
+        key=lambda item: (
+            item.get("publishedAt")
+            or item.get("createdAt")
+            or "",
+            item.get("updateId")
+            or "",
+        ),
+        reverse=True,
+    )
+
+    return items
+
+
+def _client_update_author_snapshot(
+    project: dict[str, Any],
+    identity: dict[str, Any],
+) -> dict[str, str]:
+    subject = str(
+        identity.get("subject")
+        or ""
+    ).strip()
+
+    profile = (
+        identity.get("profile")
+        or {}
+    )
+
+    name = str(
+        profile.get("displayName")
+        or ""
+    ).strip()
+
+    if not name and subject:
+        staff = _staff_record(
+            subject
+        )
+
+        if staff:
+            name = str(
+                staff.get("displayName")
+                or ""
+            ).strip()
+
+    if not name:
+        name = "KASANE Team"
+
+    project_id = str(
+        project.get("projectId")
+        or ""
+    ).strip()
+
+    membership = (
+        _project_member_record(
+            project_id,
+            subject,
+        )
+        if project_id and subject
+        else None
+    )
+
+    role = ""
+
+    if (
+        str(
+            project.get(
+                "clientContactUserId"
+            )
+            or ""
+        ).strip()
+        == subject
+    ):
+        role = str(
+            project.get(
+                "clientContactRole"
+            )
+            or ""
+        ).strip()
+
+    if (
+        not role
+        and membership
+    ):
+        role = (
+            _default_client_contact_role(
+                membership
+            )
+        )
+
+    if not role:
+        role = "KASANE Team"
+
+    return {
+        "userId": subject,
+        "name": name,
+        "role": role,
+    }
+
+
+def _create_project_client_update(
+    project: dict[str, Any],
+    body: str,
+    identity: dict[str, Any],
+) -> dict[str, Any]:
+    project_id = str(
+        project.get("projectId")
+        or ""
+    ).strip()
+
+    update_id = _new_record_id(
+        "UPD"
+    )
+
+    now = _utcnow()
+
+    author = (
+        _client_update_author_snapshot(
+            project,
+            identity,
+        )
+    )
+
+    item = {
+        "PK":
+            f"PROJECT#{project_id}",
+        "SK":
+            f"CLIENTUPDATE#{update_id}",
+        "recordType":
+            "CLIENT_UPDATE",
+        "projectId":
+            project_id,
+        "updateId":
+            update_id,
+        "body":
+            body,
+        "status":
+            "DRAFT",
+        "authorUserId":
+            author["userId"],
+        "authorName":
+            author["name"],
+        "authorRole":
+            author["role"],
+        "createdAt":
+            now,
+        "createdBy":
+            identity["subject"],
+        "updatedAt":
+            now,
+        "updatedBy":
+            identity["subject"],
+    }
+
+    _ops_table().put_item(
+        Item=item,
+        ConditionExpression=(
+            "attribute_not_exists(PK) "
+            "AND attribute_not_exists(SK)"
+        ),
+    )
+
+    _record_activity(
+        project_id,
+        identity["subject"],
+        "CLIENT_UPDATE_DRAFT_CREATED",
+        "Created client update draft",
+        {
+            "updateId":
+                update_id,
+        },
+    )
+
+    return item
+
+
+def _update_project_client_update(
+    current: dict[str, Any],
+    body: str,
+    actor_subject: str,
+) -> dict[str, Any]:
+    if (
+        str(
+            current.get("status")
+            or ""
+        ).upper()
+        != "DRAFT"
+    ):
+        raise ValueError(
+            "client_update_not_editable"
+        )
+
+    project_id = str(
+        current.get("projectId")
+        or ""
+    ).strip()
+
+    update_id = str(
+        current.get("updateId")
+        or ""
+    ).strip()
+
+    now = _utcnow()
+
+    result = _ops_table().update_item(
+        Key={
+            "PK":
+                f"PROJECT#{project_id}",
+            "SK":
+                f"CLIENTUPDATE#{update_id}",
+        },
+        UpdateExpression=(
+            "SET body = :body, "
+            "updatedAt = :now, "
+            "updatedBy = :actor"
+        ),
+        ConditionExpression=(
+            "recordType = :record_type "
+            "AND #status = :draft"
+        ),
+        ExpressionAttributeNames={
+            "#status": "status",
+        },
+        ExpressionAttributeValues={
+            ":body":
+                body,
+            ":now":
+                now,
+            ":actor":
+                actor_subject,
+            ":record_type":
+                "CLIENT_UPDATE",
+            ":draft":
+                "DRAFT",
+        },
+        ReturnValues="ALL_NEW",
+    )
+
+    updated = result["Attributes"]
+
+    _record_activity(
+        project_id,
+        actor_subject,
+        "CLIENT_UPDATE_DRAFT_UPDATED",
+        "Updated client update draft",
+        {
+            "updateId":
+                update_id,
+        },
+    )
+
+    return updated
+
+
+def _publish_project_client_update(
+    current: dict[str, Any],
+    actor_subject: str,
+) -> tuple[
+    dict[str, Any],
+    bool,
+]:
+    if (
+        str(
+            current.get("status")
+            or ""
+        ).upper()
+        == "PUBLISHED"
+    ):
+        return current, False
+
+    if (
+        str(
+            current.get("status")
+            or ""
+        ).upper()
+        != "DRAFT"
+    ):
+        raise ValueError(
+            "client_update_not_publishable"
+        )
+
+    project_id = str(
+        current.get("projectId")
+        or ""
+    ).strip()
+
+    update_id = str(
+        current.get("updateId")
+        or ""
+    ).strip()
+
+    now = _utcnow()
+
+    result = _ops_table().update_item(
+        Key={
+            "PK":
+                f"PROJECT#{project_id}",
+            "SK":
+                f"CLIENTUPDATE#{update_id}",
+        },
+        UpdateExpression=(
+            "SET #status = :published, "
+            "publishedAt = :now, "
+            "publishedBy = :actor, "
+            "updatedAt = :now, "
+            "updatedBy = :actor"
+        ),
+        ConditionExpression=(
+            "recordType = :record_type "
+            "AND #status = :draft"
+        ),
+        ExpressionAttributeNames={
+            "#status": "status",
+        },
+        ExpressionAttributeValues={
+            ":published":
+                "PUBLISHED",
+            ":draft":
+                "DRAFT",
+            ":now":
+                now,
+            ":actor":
+                actor_subject,
+            ":record_type":
+                "CLIENT_UPDATE",
+        },
+        ReturnValues="ALL_NEW",
+    )
+
+    updated = result["Attributes"]
+
+    _record_activity(
+        project_id,
+        actor_subject,
+        "CLIENT_UPDATE_PUBLISHED",
+        "Published client update",
+        {
+            "updateId":
+                update_id,
+        },
+    )
+
+    return updated, True
+
+
+def _project_client_update_write_access_error(
+    event: dict[str, Any],
+    identity: dict[str, Any],
+):
+    parameters = (
+        event.get("pathParameters")
+        or {}
+    )
+
+    project_id = str(
+        parameters.get("projectId")
+        or ""
+    ).strip()
+
+    if not project_id:
+        return _response(
+            400,
+            {
+                "error":
+                    "project_id_required"
+            },
+        )
+
+    try:
+        project = _project_record(
+            project_id
+        )
+
+    except (
+        BotoCoreError,
+        ClientError,
+        RuntimeError,
+    ):
+        LOGGER.exception(
+            "Failed to authorize "
+            "client update write"
+        )
+
+        return _response(
+            503,
+            {
+                "error":
+                    "temporarily_unavailable"
+            },
+        )
+
+    if not project:
+        return _response(
+            404,
+            {
+                "error":
+                    "project_not_found"
+            },
+        )
+
+    if (
+        str(
+            project.get("status")
+            or "ACTIVE"
+        ).upper()
+        != "ACTIVE"
+    ):
+        return _response(
+            409,
+            {
+                "error":
+                    "project_locked"
+            },
+        )
+
+    if identity["role"] in {
+        "OWNER",
+        "MANAGER",
+    }:
+        return None
+
+    if not _can_view_project(
+        identity,
+        project,
+    ):
+        return _response(
+            403,
+            {
+                "error":
+                    "project_access_required"
+            },
+        )
+
+    membership = (
+        _project_member_record(
+            project_id,
+            identity["subject"],
+        )
+    )
+
+    if (
+        not membership
+        or str(
+            membership.get(
+                "membershipStatus"
+            )
+            or ""
+        ).upper()
+            != "ACTIVE"
+        or str(
+            membership.get(
+                "projectRole"
+            )
+            or ""
+        ).upper()
+            == "VIEWER"
+    ):
+        return _response(
+            403,
+            {
+                "error":
+                    "project_write_access_required"
+            },
+        )
+
+    return None
+
+
+def _client_update_body(
+    event: dict[str, Any],
+) -> tuple[str, dict[str, Any] | None]:
+    payload = _request_body(
+        event
+    )
+
+    if payload is None:
+        return "", _response(
+            400,
+            {
+                "error":
+                    "invalid_json"
+            },
+        )
+
+    body = str(
+        payload.get("body")
+        or ""
+    ).strip()
+
+    if not body:
+        return "", _response(
+            400,
+            {
+                "error":
+                    "client_update_body_required"
+            },
+        )
+
+    if len(body) > 4000:
+        return "", _response(
+            400,
+            {
+                "error":
+                    "client_update_body_too_long"
+            },
+        )
+
+    return body, None
+
+
+def _handle_list_project_client_updates(
+    event: dict[str, Any],
+):
+    project_id = str(
+        (
+            event.get("pathParameters")
+            or {}
+        ).get("projectId")
+        or ""
+    ).strip()
+
+    try:
+        items = (
+            _list_project_client_updates(
+                project_id
+            )
+        )
+
+    except (
+        BotoCoreError,
+        ClientError,
+        RuntimeError,
+    ):
+        LOGGER.exception(
+            "Failed to list client updates"
+        )
+
+        return _response(
+            503,
+            {
+                "error":
+                    "temporarily_unavailable"
+            },
+        )
+
+    return _response(
+        200,
+        {
+            "items": items,
+            "count": len(items),
+        },
+    )
+
+
+def _handle_create_project_client_update(
+    event: dict[str, Any],
+    identity: dict[str, Any],
+):
+    body, error = (
+        _client_update_body(
+            event
+        )
+    )
+
+    if error:
+        return error
+
+    project_id = str(
+        (
+            event.get("pathParameters")
+            or {}
+        ).get("projectId")
+        or ""
+    ).strip()
+
+    try:
+        project = _project_record(
+            project_id
+        )
+
+        if not project:
+            return _response(
+                404,
+                {
+                    "error":
+                        "project_not_found"
+                },
+            )
+
+        item = (
+            _create_project_client_update(
+                project,
+                body,
+                identity,
+            )
+        )
+
+    except (
+        BotoCoreError,
+        ClientError,
+        RuntimeError,
+    ):
+        LOGGER.exception(
+            "Client update creation failed"
+        )
+
+        return _response(
+            503,
+            {
+                "error":
+                    "temporarily_unavailable"
+            },
+        )
+
+    return _response(
+        201,
+        {
+            "update":
+                _public_client_update(
+                    item
+                )
+        },
+    )
+
+
+def _handle_update_project_client_update(
+    event: dict[str, Any],
+    identity: dict[str, Any],
+):
+    body, error = (
+        _client_update_body(
+            event
+        )
+    )
+
+    if error:
+        return error
+
+    parameters = (
+        event.get("pathParameters")
+        or {}
+    )
+
+    project_id = str(
+        parameters.get("projectId")
+        or ""
+    ).strip()
+
+    update_id = str(
+        parameters.get("updateId")
+        or ""
+    ).strip()
+
+    try:
+        current = (
+            _client_update_record(
+                project_id,
+                update_id,
+            )
+        )
+
+        if not current:
+            return _response(
+                404,
+                {
+                    "error":
+                        "client_update_not_found"
+                },
+            )
+
+        updated = (
+            _update_project_client_update(
+                current,
+                body,
+                identity["subject"],
+            )
+        )
+
+    except ValueError as exc:
+        return _response(
+            409,
+            {
+                "error":
+                    str(exc)
+            },
+        )
+
+    except ClientError as exc:
+        if (
+            _aws_error_code(exc)
+            ==
+            "ConditionalCheckFailedException"
+        ):
+            return _response(
+                409,
+                {
+                    "error":
+                        "client_update_changed_refresh"
+                },
+            )
+
+        LOGGER.exception(
+            "Client update edit failed"
+        )
+
+        return _response(
+            503,
+            {
+                "error":
+                    "temporarily_unavailable"
+            },
+        )
+
+    except (
+        BotoCoreError,
+        RuntimeError,
+    ):
+        LOGGER.exception(
+            "Client update edit failed"
+        )
+
+        return _response(
+            503,
+            {
+                "error":
+                    "temporarily_unavailable"
+            },
+        )
+
+    return _response(
+        200,
+        {
+            "update":
+                _public_client_update(
+                    updated
+                )
+        },
+    )
+
+
+def _handle_publish_project_client_update(
+    event: dict[str, Any],
+    identity: dict[str, Any],
+):
+    parameters = (
+        event.get("pathParameters")
+        or {}
+    )
+
+    project_id = str(
+        parameters.get("projectId")
+        or ""
+    ).strip()
+
+    update_id = str(
+        parameters.get("updateId")
+        or ""
+    ).strip()
+
+    try:
+        current = (
+            _client_update_record(
+                project_id,
+                update_id,
+            )
+        )
+
+        if not current:
+            return _response(
+                404,
+                {
+                    "error":
+                        "client_update_not_found"
+                },
+            )
+
+        updated, changed = (
+            _publish_project_client_update(
+                current,
+                identity["subject"],
+            )
+        )
+
+    except ValueError as exc:
+        return _response(
+            409,
+            {
+                "error":
+                    str(exc)
+            },
+        )
+
+    except ClientError as exc:
+        if (
+            _aws_error_code(exc)
+            ==
+            "ConditionalCheckFailedException"
+        ):
+            return _response(
+                409,
+                {
+                    "error":
+                        "client_update_changed_refresh"
+                },
+            )
+
+        LOGGER.exception(
+            "Client update publish failed"
+        )
+
+        return _response(
+            503,
+            {
+                "error":
+                    "temporarily_unavailable"
+            },
+        )
+
+    except (
+        BotoCoreError,
+        RuntimeError,
+    ):
+        LOGGER.exception(
+            "Client update publish failed"
+        )
+
+        return _response(
+            503,
+            {
+                "error":
+                    "temporarily_unavailable"
+            },
+        )
+
+    return _response(
+        200,
+        {
+            "update":
+                _public_client_update(
+                    updated
+                ),
+            "changed":
+                changed,
+        },
+    )
+
+
+
 PROJECT_LIFECYCLE_WRITE_SUFFIXES = {
     "/complete",
     "/cancel",
@@ -13316,6 +14318,94 @@ def handler(
         return _handle_unlink_project_vendor(
             event,
             identity,
+        )
+
+    if (
+        method == "GET"
+        and path.endswith("/updates")
+        and "/v1/admin/projects/" in path
+    ):
+        access_error = (
+            _project_read_access_error(
+                event,
+                identity,
+            )
+        )
+
+        if access_error:
+            return access_error
+
+        return (
+            _handle_list_project_client_updates(
+                event
+            )
+        )
+
+    if (
+        method == "POST"
+        and path.endswith("/updates")
+        and "/v1/admin/projects/" in path
+    ):
+        access_error = (
+            _project_client_update_write_access_error(
+                event,
+                identity,
+            )
+        )
+
+        if access_error:
+            return access_error
+
+        return (
+            _handle_create_project_client_update(
+                event,
+                identity,
+            )
+        )
+
+    if (
+        method == "POST"
+        and path.endswith("/publish")
+        and "/updates/" in path
+        and "/v1/admin/projects/" in path
+    ):
+        access_error = (
+            _project_client_update_write_access_error(
+                event,
+                identity,
+            )
+        )
+
+        if access_error:
+            return access_error
+
+        return (
+            _handle_publish_project_client_update(
+                event,
+                identity,
+            )
+        )
+
+    if (
+        method == "PATCH"
+        and "/updates/" in path
+        and "/v1/admin/projects/" in path
+    ):
+        access_error = (
+            _project_client_update_write_access_error(
+                event,
+                identity,
+            )
+        )
+
+        if access_error:
+            return access_error
+
+        return (
+            _handle_update_project_client_update(
+                event,
+                identity,
+            )
         )
 
     if (

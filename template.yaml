@@ -825,6 +825,34 @@ Resources:
             TableName: !Ref OpsTable
 
       Events:
+        ListProjectClientUpdates:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref AdminApi
+            Path: /v1/admin/projects/{projectId}/updates
+            Method: GET
+
+        CreateProjectClientUpdate:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref AdminApi
+            Path: /v1/admin/projects/{projectId}/updates
+            Method: POST
+
+        UpdateProjectClientUpdate:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref AdminApi
+            Path: /v1/admin/projects/{projectId}/updates/{updateId}
+            Method: PATCH
+
+        PublishProjectClientUpdate:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref AdminApi
+            Path: /v1/admin/projects/{projectId}/updates/{updateId}/publish
+            Method: POST
+
         UpdateProjectPhase:
           Type: HttpApi
           Properties:

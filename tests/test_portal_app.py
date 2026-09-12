@@ -294,6 +294,11 @@ def test_project_detail_returns_safe_project():
             "_client_visible_vendors",
             return_value=[],
         ),
+        patch.object(
+            portal_app,
+            "_client_updates",
+            return_value=[],
+        ),
     ):
         response = portal_app.handler(
             event(
@@ -374,6 +379,11 @@ def test_public_share_does_not_require_auth():
         patch.object(
             portal_app,
             "_client_visible_vendors",
+            return_value=[],
+        ),
+        patch.object(
+            portal_app,
+            "_client_updates",
             return_value=[],
         ),
     ):
@@ -693,6 +703,11 @@ def test_public_share_includes_client_visible_vendors():
             portal_app,
             "_client_visible_vendors",
             return_value=safe_vendors,
+        ),
+        patch.object(
+            portal_app,
+            "_client_updates",
+            return_value=[],
         ),
     ):
         response = portal_app.handler(

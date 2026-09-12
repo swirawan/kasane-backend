@@ -328,6 +328,7 @@ def _public_client_project(
     *,
     resolve_contact: bool = False,
     resolve_vendors: bool = False,
+    resolve_updates: bool = False,
 ) -> dict[str, Any]:
     contact = (
         _resolved_client_contact(
@@ -350,6 +351,17 @@ def _public_client_project(
             )
         )
         if resolve_vendors
+        else []
+    )
+
+    updates = (
+        _client_updates(
+            str(
+                item.get("projectId")
+                or ""
+            )
+        )
+        if resolve_updates
         else []
     )
 
@@ -414,6 +426,8 @@ def _public_client_project(
             contact,
         "clientVendors":
             vendors,
+        "clientUpdates":
+            updates,
         "musubiClientVisible": (
             item.get(
                 "musubiClientVisible"
@@ -658,6 +672,86 @@ def _client_visible_vendors(
     )
 
 
+def _client_updates(
+    project_id: str,
+) -> list[dict[str, str]]:
+    if not project_id:
+        return []
+
+    response = _ops_table().query(
+        KeyConditionExpression=(
+            "PK = :pk AND "
+            "begins_with(SK, :prefix)"
+        ),
+        ExpressionAttributeValues={
+            ":pk":
+                f"PROJECT#{project_id}",
+            ":prefix":
+                "CLIENTUPDATE#",
+        },
+        ConsistentRead=True,
+    )
+
+    updates = []
+
+    for item in (
+        response.get("Items")
+        or []
+    ):
+        if (
+            not isinstance(item, dict)
+            or item.get("recordType")
+                != "CLIENT_UPDATE"
+            or str(
+                item.get("status")
+                or ""
+            ).upper()
+                != "PUBLISHED"
+        ):
+            continue
+
+        body = str(
+            item.get("body")
+            or ""
+        ).strip()
+
+        if not body:
+            continue
+
+        updates.append({
+            "updateId": str(
+                item.get("updateId")
+                or ""
+            ),
+            "body": body,
+            "authorName": str(
+                item.get("authorName")
+                or "KASANE Team"
+            ).strip(),
+            "authorRole": str(
+                item.get("authorRole")
+                or "KASANE Team"
+            ).strip(),
+            "publishedAt": str(
+                item.get("publishedAt")
+                or ""
+            ),
+        })
+
+    updates.sort(
+        key=lambda item: (
+            item.get("publishedAt")
+            or "",
+            item.get("updateId")
+            or "",
+        ),
+        reverse=True,
+    )
+
+    return updates
+
+
+
 def _shared_project(
     share_id: str,
 ) -> dict[str, Any] | None:
@@ -874,6 +968,7 @@ def handler(
                         project,
                         resolve_contact=True,
                         resolve_vendors=True,
+                        resolve_updates=True,
                     )
             },
         )
@@ -992,6 +1087,7 @@ def handler(
                         project,
                         resolve_contact=True,
                         resolve_vendors=True,
+                        resolve_updates=True,
                     )
             },
         )
