@@ -2724,3 +2724,125 @@ def test_view_as_client_uses_safe_serializer():
         ["name"]
         == "Davin"
     )
+
+
+
+def test_admin_portal_share_returns_recoverable_active_link():
+    item = project()
+
+    item["portalShareStatus"] = "ACTIVE"
+    item["portalShareSuffix"] = "ABC123"
+    item["portalShareId"] = (
+        "private-share-id-123456789012"
+    )
+
+    public = (
+        admin_app._public_portal_share(
+            item
+        )
+    )
+
+    assert "shareId" not in public
+    assert "path" not in public
+
+    managed = (
+        admin_app._admin_portal_share(
+            item
+        )
+    )
+
+    assert managed == {
+        "status": "ACTIVE",
+        "shareSuffix": "ABC123",
+        "shareId":
+            "private-share-id-123456789012",
+        "path":
+            "/p/private-share-id-123456789012",
+    }
+
+
+def test_admin_portal_share_hides_id_when_disabled():
+    item = project()
+
+    item["portalShareStatus"] = "DISABLED"
+    item["portalShareId"] = (
+        "private-share-id-123456789012"
+    )
+
+    managed = (
+        admin_app._admin_portal_share(
+            item
+        )
+    )
+
+    assert managed == {
+        "status": "DISABLED",
+        "shareSuffix": "",
+    }
+
+
+def test_existing_active_portal_share_returns_stored_id():
+    item = project()
+
+    item["portalShareStatus"] = "ACTIVE"
+    item["portalShareKey"] = (
+        "PORTAL#SHARE#" + "a" * 64
+    )
+    item["portalShareId"] = (
+        "private-share-id-123456789012"
+    )
+
+    updated, changed, share_id = (
+        admin_app._enable_portal_share(
+            item,
+            "user-1",
+        )
+    )
+
+    assert updated is item
+    assert changed is False
+    assert (
+        share_id
+        == "private-share-id-123456789012"
+    )
+
+
+def test_get_portal_share_returns_stored_id():
+    item = project()
+
+    item["portalShareStatus"] = "ACTIVE"
+    item["portalShareSuffix"] = "ABC123"
+    item["portalShareId"] = (
+        "private-share-id-123456789012"
+    )
+
+    with patch.object(
+        admin_app,
+        "_project_record",
+        return_value=item,
+    ):
+        response = (
+            admin_app
+            ._handle_get_portal_share(
+                event(
+                    "GET",
+                    "/v1/admin/projects/"
+                    "KAS-001/portal-share",
+                    project_id="KAS-001",
+                )
+            )
+        )
+
+    assert response["statusCode"] == 200
+
+    result = body(response)["portalShare"]
+
+    assert (
+        result["shareId"]
+        == "private-share-id-123456789012"
+    )
+
+    assert (
+        result["path"]
+        == "/p/private-share-id-123456789012"
+    )

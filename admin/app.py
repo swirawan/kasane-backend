@@ -696,6 +696,32 @@ def _public_portal_share(
     }
 
 
+
+def _admin_portal_share(
+    item: dict[str, Any],
+) -> dict[str, Any]:
+    result = _public_portal_share(
+        item
+    )
+
+    if result["status"] != "ACTIVE":
+        return result
+
+    share_id = str(
+        item.get("portalShareId")
+        or ""
+    ).strip()
+
+    if not share_id:
+        return result
+
+    return {
+        **result,
+        "shareId": share_id,
+        "path": f"/p/{share_id}",
+    }
+
+
 def _public_project(
     item: dict[str, Any],
 ) -> dict[str, Any]:
@@ -3469,9 +3495,16 @@ def _enable_portal_share(
         and existing_key
         and existing_status == "ACTIVE"
     ):
-        # The bearer credential is deliberately
-        # unrecoverable after creation.
-        return current, False, ""
+        existing_share_id = str(
+            current.get("portalShareId")
+            or ""
+        ).strip()
+
+        return (
+            current,
+            False,
+            existing_share_id,
+        )
 
     share_id = (
         _new_portal_share_id()
@@ -3541,6 +3574,7 @@ def _enable_portal_share(
                 "UpdateExpression": (
                     "SET "
                     "portalShareKey = :share_key, "
+                    "portalShareId = :share_id, "
                     "portalShareSuffix = :suffix, "
                     "portalShareStatus = :active, "
                     "portalShareCreatedAt = "
@@ -3560,6 +3594,8 @@ def _enable_portal_share(
                     _serialize_map({
                         ":share_key":
                             share_key,
+                        ":share_id":
+                            share_id,
                         ":suffix":
                             share_id[-6:],
                         ":active":
@@ -3689,6 +3725,7 @@ def _disable_portal_share(
                 "updatedBy = :actor "
                 "REMOVE "
                 "portalShareKey, "
+                "portalShareId, "
                 "portalShareSuffix"
             ),
             "ConditionExpression": (
@@ -3813,7 +3850,7 @@ def _handle_get_portal_share(
         200,
         {
             "portalShare":
-                _public_portal_share(
+                _admin_portal_share(
                     project
                 )
         },
